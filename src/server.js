@@ -14,7 +14,6 @@ import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
 import { depositsEnabled } from "./solana.js";
-import { getIconCached, warmIcons } from "./steamicon.js";
 
 const PORT = process.env.PORT || 8080;
 const MOCK = process.env.MOCK !== "0"; // legacy flag
@@ -211,7 +210,7 @@ app.get("/api/markets", (_req, res) => {
     const change = change24hOf(m.key, s.price);
     return {
       key: m.key, name: m.name, image: m.image, price: s.price,
-      wear: s.wear, icon: getIconCached(m.hash), change24h: change, funding: s.funding, updatedAt: s.updatedAt,
+      wear: s.wear, icon: getSteamIconCached(m.hash), change24h: change, funding: s.funding, updatedAt: s.updatedAt,
     };
   });
   res.json({ mock: IS_MOCK, source: SOURCE, tf: CANDLE_TF_SEC, nextFunding: nextFundingTs(), markets: list });
@@ -393,7 +392,6 @@ app.listen(PORT, "0.0.0.0", () => {
   try { tick(); } catch (e) { console.error("[startup] tick:", e.message); }
   setInterval(tick, POLL_MS);
   try { warmSteamHistory(MARKETS.map((m) => m.hash)); } catch (e) { console.error("[startup] steam:", e.message); }
-  try { warmIcons(MARKETS.map((m) => m.hash)); } catch (e) { console.error("[startup] icons:", e.message); }
   initDb()
     .then(() => { if (process.env.DATABASE_URL) return initSettlementTables(); })
     .then(() => restoreRings())   // table exists by now — rehydrate the 24h ring
