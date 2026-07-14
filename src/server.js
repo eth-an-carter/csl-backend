@@ -102,12 +102,26 @@ async function restoreRings() {
 }
 function change24hOf(key, price) {
   const arr = ring.get(key);
-  if (!arr || !arr.length) return 0;
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  // oldest sample within/nearest to 24h ago (falls back to earliest = change since boot)
-  let ref = arr[0];
-  for (const s of arr) { if (s.t <= cutoff) ref = s; else break; }
-  return ref.price ? ((price - ref.price) / ref.price) * 100 : 0;
+  // 1) a real sample from ~24h ago (the ring is persisted, so this survives deploys)
+  if (arr && arr.length) {
+    let ref = null;
+    for (const s of arr) { if (s.t <= cutoff) ref = s; else break; }
+    if (ref && ref.price) return ((price - ref.price) / ref.price) * 100;
+  }
+  // 2) cold ring (fresh deploy, DB empty): fall back to yesterday's close from
+  //    the Steam daily series — a ratio, so the price basis cancels out. Beats
+  //    printing a flat +0.00% on every market for the first day.
+  const m = MARKETS.find((x) => x.key === key);
+  const hist = m && getSteamHistoryCached(m.hash);
+  if (hist && hist.length >= 2) {
+    const prev = hist[hist.length - 2]?.close;
+    const last = hist[hist.length - 1]?.close;
+    if (prev > 0 && last > 0) return ((last - prev) / prev) * 100;
+  }
+  // 3) nothing to compare against yet
+  if (arr && arr.length && arr[0].price) return ((price - arr[0].price) / arr[0].price) * 100;
+  return 0;
 }
 
 // next funding timestamp (aligned to interval)
