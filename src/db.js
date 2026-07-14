@@ -50,8 +50,47 @@ export async function initDb() {
       closed_at bigint NOT NULL
     );
     CREATE INDEX IF NOT EXISTS trades_user_idx ON trades(privy_id);
+    -- rolling price samples (~5 min apart) so the 24h change survives restarts
+    CREATE TABLE IF NOT EXISTS price_samples (
+      key   text NOT NULL,
+      t     bigint NOT NULL,
+      price double precision NOT NULL,
+      PRIMARY KEY (key, t)
+    );
+    CREATE INDEX IF NOT EXISTS price_samples_key_t_idx ON price_samples(key, t DESC);
   `);
   console.log("[db] schema ready");
+}
+
+/* ---- 24h price ring, persisted ------------------------------------------- */
+
+// Load the last ~26h of samples for every market on boot.
+export async function loadPriceSamples() {
+  if (!pool) return new Map();
+  const cutoff = Date.now() - 26 * 60 * 60 * 1000;
+  const rows = (await pool.query(
+    `SELECT key, t, price FROM price_samples WHERE t >= $1 ORDER BY t ASC`, [cutoff]
+  )).rows;
+  const m = new Map();
+  for (const r of rows) {
+    if (!m.has(r.key)) m.set(r.key, []);
+    m.get(r.key).push({ t: Number(r.t), price: Number(r.price) });
+  }
+  return m;
+}
+
+export async function savePriceSample(key, t, price) {
+  if (!pool) return;
+  await pool.query(
+    `INSERT INTO price_samples (key, t, price) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [key, t, price]
+  );
+}
+
+// Drop anything older than 26h so the table stays tiny.
+export async function prunePriceSamples() {
+  if (!pool) return;
+  await pool.query(`DELETE FROM price_samples WHERE t < $1`, [Date.now() - 26 * 60 * 60 * 1000]);
 }
 
 export async function ensureUser(privyId) {

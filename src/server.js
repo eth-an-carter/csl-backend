@@ -9,11 +9,12 @@ import { csfloatDiag } from "./csfloat.js";
 import { fetchDailyHistory, historyEnabled } from "./history.js";
 import { fetchSteamHistory, getSteamHistoryCached, steamChartEnabled, warmSteamHistory } from "./steamchart.js";
 import { fetchInventory } from "./inventory.js";
-import { initDb, dbReady, getAccount } from "./db.js";
+import { initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples } from "./db.js";
 import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
 import { depositsEnabled } from "./solana.js";
+import { getIconCached, warmIcons } from "./steamicon.js";
 
 const PORT = process.env.PORT || 8080;
 const MOCK = process.env.MOCK !== "0"; // legacy flag
@@ -75,9 +76,29 @@ for (const m of MARKETS) {
 function sampleRing(key, price) {
   const arr = ring.get(key);
   const now = Date.now();
-  if (!arr.length || now - arr[arr.length - 1].t >= 5 * 60 * 1000) arr.push({ t: now, price });
+  if (!arr.length || now - arr[arr.length - 1].t >= 5 * 60 * 1000) {
+    arr.push({ t: now, price });
+    // mirror to Postgres so a redeploy doesn't reset every 24h % to 0.00
+    savePriceSample(key, now, price).catch(() => {});
+  }
   // keep ~26h of 5-min samples
   while (arr.length > 320) arr.shift();
+}
+
+// Rehydrate the ring from the DB on boot, then prune the old rows hourly.
+async function restoreRings() {
+  if (!dbReady()) return;
+  try {
+    const saved = await loadPriceSamples();
+    let n = 0;
+    for (const [key, arr] of saved) {
+      if (ring.has(key)) { ring.set(key, arr); n += arr.length; }
+    }
+    console.log(`[24h] restored ${n} price samples from db`);
+    setInterval(() => prunePriceSamples().catch(() => {}), 60 * 60 * 1000);
+  } catch (e) {
+    console.warn("[24h] restore failed:", e.message);
+  }
 }
 function change24hOf(key, price) {
   const arr = ring.get(key);
@@ -176,7 +197,7 @@ app.get("/api/markets", (_req, res) => {
     const change = change24hOf(m.key, s.price);
     return {
       key: m.key, name: m.name, image: m.image, price: s.price,
-      wear: s.wear, change24h: change, funding: s.funding, updatedAt: s.updatedAt,
+      wear: s.wear, icon: getIconCached(m.hash), change24h: change, funding: s.funding, updatedAt: s.updatedAt,
     };
   });
   res.json({ mock: IS_MOCK, source: SOURCE, tf: CANDLE_TF_SEC, nextFunding: nextFundingTs(), markets: list });
@@ -358,8 +379,10 @@ app.listen(PORT, "0.0.0.0", () => {
   try { tick(); } catch (e) { console.error("[startup] tick:", e.message); }
   setInterval(tick, POLL_MS);
   try { warmSteamHistory(MARKETS.map((m) => m.hash)); } catch (e) { console.error("[startup] steam:", e.message); }
+  try { warmIcons(MARKETS.map((m) => m.hash)); } catch (e) { console.error("[startup] icons:", e.message); }
   initDb()
     .then(() => { if (process.env.DATABASE_URL) return initSettlementTables(); })
+    .then(() => restoreRings())   // table exists by now — rehydrate the 24h ring
     .catch((e) => console.error("[db] init:", e.message));
   if (process.env.DATABASE_URL) {
     setInterval(() => scanDeposits().catch((e) => console.error("[deposits]", e.message)), 30000);
