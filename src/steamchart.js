@@ -5,6 +5,10 @@
 // No key needed. Unofficial: Steam rate-limits aggressively, so we fetch each
 // item at most once per 12h, sequentially with spacing, and cache in memory.
 // Enabled by default; disable with STEAM_CHART=0.
+//
+// LOGGED-OUT Steam only embeds ~3 months of the graph. Set STEAM_LOGIN_SECURE
+// (the `steamLoginSecure` cookie of any logged-in Steam account) and Steam
+// returns the FULL history — every sale since the skin first listed.
 // ---------------------------------------------------------------------------
 
 const ENABLED = process.env.STEAM_CHART !== "0";
@@ -37,13 +41,13 @@ export function fetchSteamHistory(hash) {
 async function doFetch(hash) {
   try {
     const url = `https://steamcommunity.com/market/listings/730/${encodeURIComponent(hash)}`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
-        Accept: "text/html",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+      Accept: "text/html",
+      "Accept-Language": "en-US,en;q=0.9",
+    };
+    if (process.env.STEAM_LOGIN_SECURE) headers.Cookie = `steamLoginSecure=${process.env.STEAM_LOGIN_SECURE}`;
+    const res = await fetch(url, { headers });
     if (!res.ok) {
       console.warn(`[steamchart] ${res.status} for ${hash}`);
       return cache.get(hash)?.candles || null; // keep stale cache on failure
