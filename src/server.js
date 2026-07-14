@@ -60,6 +60,7 @@ for (const m of MARKETS) {
   state.set(m.key, {
     key: m.key,
     name: m.name,
+    wear: m.wear,
     image: m.image,
     price: m.seed,
     prevClose: m.seed,
@@ -175,7 +176,7 @@ app.get("/api/markets", (_req, res) => {
     const change = change24hOf(m.key, s.price);
     return {
       key: m.key, name: m.name, image: m.image, price: s.price,
-      change24h: change, funding: s.funding, updatedAt: s.updatedAt,
+      wear: s.wear, change24h: change, funding: s.funding, updatedAt: s.updatedAt,
     };
   });
   res.json({ mock: IS_MOCK, source: SOURCE, tf: CANDLE_TF_SEC, nextFunding: nextFundingTs(), markets: list });
