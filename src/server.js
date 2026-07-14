@@ -193,20 +193,38 @@ app.get("/api/candles/:key", (req, res) => {
   res.json({ key: req.params.key, tf: CANDLE_TF_SEC, candles: getCandles(req.params.key) });
 });
 
+// Rebase a candle series onto OUR price basis. Steam Market runs ~2x above
+// third-party spot (Skinport/CSFloat), so raw Steam history ends at ~$12k while
+// our mark says ~$6.3k — the chart showed a cliff where the live price attached.
+// We keep the REAL shape of the history and scale the level so the last close
+// equals the current mark: an index rebase, clearly labelled in the response.
+function rebaseToMark(candles, mk) {
+  if (!mk || !Array.isArray(candles) || !candles.length) return candles;
+  const last = candles[candles.length - 1]?.close;
+  if (!last || last <= 0) return candles;
+  const f = mk / last;
+  if (Math.abs(f - 1) < 0.02) return candles; // already on our basis
+  const r2 = (n) => Math.round(n * f * 100) / 100;
+  return candles.map((c) => ({ time: c.time, open: r2(c.open), high: r2(c.high), low: r2(c.low), close: r2(c.close) }));
+}
+
 // Daily history for long-range charts. real:true only with STEAMWEBAPI_KEY.
 app.get("/api/history/:key", async (req, res) => {
   const m = MARKETS.find((x) => x.key === req.params.key);
   if (!m) return res.status(404).json({ error: "not_found" });
+  const mk = markOf(m.key);
   // 1) Steam Market full history (cached; kick off fetch if cold)
   if (steamChartEnabled()) {
     const cached = getSteamHistoryCached(m.hash);
-    if (cached && cached.length) return res.json({ key: m.key, real: true, source: "steam", tf: 86400, candles: cached });
+    if (cached && cached.length)
+      return res.json({ key: m.key, real: true, source: "steam", basis: "csl-mark", tf: 86400, candles: rebaseToMark(cached, mk) });
     fetchSteamHistory(m.hash); // warm in background; don't block the request
   }
   // 2) steamwebapi (if key set)
   if (historyEnabled()) {
     const candles = await fetchDailyHistory(m.hash);
-    if (candles && candles.length) return res.json({ key: m.key, real: true, source: "steamwebapi", tf: 86400, candles });
+    if (candles && candles.length)
+      return res.json({ key: m.key, real: true, source: "steamwebapi", basis: "csl-mark", tf: 86400, candles: rebaseToMark(candles, mk) });
   }
   res.json({ key: m.key, real: false, tf: 86400, candles: [] });
 });
