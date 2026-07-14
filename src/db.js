@@ -58,6 +58,16 @@ export async function initDb() {
       PRIMARY KEY (key, t)
     );
     CREATE INDEX IF NOT EXISTS price_samples_key_t_idx ON price_samples(key, t DESC);
+    -- every dollar owed to the burn engine, recorded as it is earned
+    CREATE TABLE IF NOT EXISTS burn_ledger (
+      id         text PRIMARY KEY,
+      source     text NOT NULL,              -- 'liquidation' | 'fee'
+      market_key text,
+      amount_usd double precision NOT NULL,
+      burned_sig text,                       -- set once the on-chain burn lands
+      created_at bigint NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS burn_ledger_open_idx ON burn_ledger(burned_sig) WHERE burned_sig IS NULL;
   `);
   console.log("[db] schema ready");
 }

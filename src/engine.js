@@ -7,7 +7,15 @@ import { randomUUID } from "crypto";
 import { pool, ensureUser } from "./db.js";
 
 export const MAINT_MARGIN = 0.005;
-export const TAKER_FEE = 0.0006;
+// 0.15% of notional. Priced to fund the burn: 10% of every liquidated collateral
+// is destroyed rather than kept by the vault, and the fee stream is what keeps
+// the vault whole across that leak. Cheap next to the 5–10% spread a skin
+// marketplace charges to move the item itself.
+export const TAKER_FEE = Number(process.env.TAKER_FEE || 0.0015);
+
+// Share of a liquidated position's collateral that is burned instead of paid to
+// the vault. Applies to the CSL burn engine; the remainder backs the vault.
+export const LIQ_BURN_SHARE = Number(process.env.LIQ_BURN_SHARE || 0.10);
 export const MAX_LEVERAGE = Number(process.env.MAX_LEVERAGE || 20);
 export const MIN_COLLATERAL = Number(process.env.MIN_COLLATERAL || 1);          // no dust positions
 export const MAX_COLLATERAL_PER_POSITION = Number(process.env.MAX_COLLATERAL_PER_POSITION || 250);
@@ -126,7 +134,18 @@ export async function liquidationSweep(markOf, fundingOf, markAgeOf = () => 0) {
       if (r.ok) {
         // bad debt = how far past zero-equity the fill landed (house eats this)
         const badDebt = r.pnl < -pos.collateral ? (-pos.collateral - r.pnl) : 0;
-        console.log(`[engine] liquidated ${pos.id} (${pos.key} ${pos.side} ${pos.leverage}x) pnl=${r.pnl.toFixed(2)}${badDebt > 0 ? ` BAD_DEBT=${badDebt.toFixed(2)}` : ""}`);
+        // what the trader actually forfeited (their loss, capped at the collateral),
+        // and the slice of it earmarked for the burn instead of the vault
+        const seized = Math.min(Number(pos.collateral), Math.max(0, -r.pnl));
+        const burnable = seized * LIQ_BURN_SHARE;
+        try {
+          await pool.query(
+            `INSERT INTO burn_ledger (id, source, market_key, amount_usd, created_at)
+             VALUES ($1, 'liquidation', $2, $3, $4)`,
+            [randomUUID(), pos.key, Number(burnable.toFixed(6)), Date.now()]
+          );
+        } catch (e) { /* ledger is best-effort — never block a liquidation */ }
+        console.log(`[engine] liquidated ${pos.id} (${pos.key} ${pos.side} ${pos.leverage}x) pnl=${r.pnl.toFixed(2)} burn=${burnable.toFixed(2)}${badDebt > 0 ? ` BAD_DEBT=${badDebt.toFixed(2)}` : ""}`);
       }
     }
   }

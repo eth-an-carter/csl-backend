@@ -9,9 +9,9 @@ import { csfloatDiag } from "./csfloat.js";
 import { fetchDailyHistory, historyEnabled } from "./history.js";
 import { fetchSteamHistory, getSteamHistoryCached, steamChartEnabled, warmSteamHistory } from "./steamchart.js";
 import { fetchInventory } from "./inventory.js";
-import { initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples } from "./db.js";
+import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples } from "./db.js";
 import { requireAuth, authEnabled } from "./auth.js";
-import { openPosition, closePosition, liquidationSweep, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE } from "./engine.js";
+import { openPosition, closePosition, liquidationSweep, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
 import { depositsEnabled } from "./solana.js";
 
@@ -243,6 +243,30 @@ function rebaseToMark(candles, mk) {
   return candles.map((c) => ({ time: c.time, open: r2(c.open), high: r2(c.high), low: r2(c.low), close: r2(c.close) }));
 }
 
+// Public burn stats: what the burn engine owes, what it has already destroyed.
+app.get("/api/burn", async (_req, res) => {
+  if (!dbReady()) return res.json({ enabled: false });
+  try {
+    const q = await pool.query(
+      `SELECT
+         COALESCE(SUM(amount_usd) FILTER (WHERE burned_sig IS NOT NULL), 0) AS burned,
+         COALESCE(SUM(amount_usd) FILTER (WHERE burned_sig IS NULL), 0)     AS pending,
+         COUNT(*) FILTER (WHERE burned_sig IS NOT NULL)                     AS burns
+       FROM burn_ledger`
+    );
+    const r = q.rows[0] || {};
+    res.json({
+      enabled: true,
+      burnShare: LIQ_BURN_SHARE,
+      burnedUsd: Number(r.burned) || 0,
+      pendingUsd: Number(r.pending) || 0,
+      burnCount: Number(r.burns) || 0,
+    });
+  } catch (e) {
+    res.status(500).json({ error: "burn_stats_failed" });
+  }
+});
+
 // Daily history for long-range charts. real:true only with STEAMWEBAPI_KEY.
 app.get("/api/history/:key", async (req, res) => {
   const m = MARKETS.find((x) => x.key === req.params.key);
@@ -362,6 +386,7 @@ app.get("/api/config", (_req, res) => res.json({
   maxLeverage: MAX_LEVERAGE,
   maxCollateralPerPosition: MAX_COLLATERAL_PER_POSITION,
   takerFee: TAKER_FEE,
+  liqBurnShare: LIQ_BURN_SHARE,
   accounts: dbReady() && authEnabled(),
   deposits: dbReady() && depositsEnabled(),
   oracle: { multiSource: !IS_MOCK, source: SOURCE },
