@@ -110,15 +110,21 @@ function change24hOf(key, price) {
     for (const s of arr) { if (s.t <= cutoff) ref = s; else break; }
     if (ref && ref.price) return ((price - ref.price) / ref.price) * 100;
   }
-  // 2) cold ring (fresh deploy, DB empty): fall back to yesterday's close from
-  //    the Steam daily series — a ratio, so the price basis cancels out. Beats
-  //    printing a flat +0.00% on every market for the first day.
+  // 2) cold ring (fresh deploy, DB empty): day-over-day from the Steam daily
+  //    series. It is a RATIO of two consecutive closes, so the basis cancels —
+  //    but only if both closes are sane. We take the last two candles whose
+  //    ratio is within a believable daily band; a raw cents/glitch row is
+  //    skipped rather than printing -99%.
   const m = MARKETS.find((x) => x.key === key);
   const hist = m && getSteamHistoryCached(m.hash);
   if (hist && hist.length >= 2) {
-    const prev = hist[hist.length - 2]?.close;
-    const last = hist[hist.length - 1]?.close;
-    if (prev > 0 && last > 0) return ((last - prev) / prev) * 100;
+    for (let i = hist.length - 1; i >= 1; i--) {
+      const last = hist[i]?.close, prev = hist[i - 1]?.close;
+      if (prev > 0 && last > 0) {
+        const chg = ((last - prev) / prev) * 100;
+        if (Math.abs(chg) <= 40) return chg; // believable daily move
+      }
+    }
   }
   // 3) nothing to compare against yet
   if (arr && arr.length && arr[0].price) return ((price - arr[0].price) / arr[0].price) * 100;
@@ -235,14 +241,36 @@ app.get("/api/candles/:key", (req, res) => {
 // our mark says ~$6.3k — the chart showed a cliff where the live price attached.
 // We keep the REAL shape of the history and scale the level so the last close
 // equals the current mark: an index rebase, clearly labelled in the response.
+function medianOf(nums) {
+  const a = nums.filter((n) => Number.isFinite(n) && n > 0).sort((x, y) => x - y);
+  if (!a.length) return 0;
+  const m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+}
+
+// Rebase a candle series onto OUR price basis. Anchoring on a single last close
+// is fragile — one bad row (a cents value, a Steam glitch) throws the whole
+// scale off and the chart flies to millions. Instead we anchor on the MEDIAN of
+// the last ~20 closes, then drop any candle that is still absurd versus that
+// median (>8x or <1/8x) so a stray print can't stretch the axis.
 function rebaseToMark(candles, mk) {
   if (!mk || !Array.isArray(candles) || !candles.length) return candles;
-  const last = candles[candles.length - 1]?.close;
-  if (!last || last <= 0) return candles;
-  const f = mk / last;
-  if (Math.abs(f - 1) < 0.02) return candles; // already on our basis
+  const tail = candles.slice(-20).map((c) => c.close);
+  const anchor = medianOf(tail);
+  if (!anchor || anchor <= 0) return candles;
+  const f = mk / anchor;
   const r2 = (n) => Math.round(n * f * 100) / 100;
-  return candles.map((c) => ({ time: c.time, open: r2(c.open), high: r2(c.high), low: r2(c.low), close: r2(c.close) }));
+  const out = [];
+  for (const c of candles) {
+    const rc = { time: c.time, open: r2(c.open), high: r2(c.high), low: r2(c.low), close: r2(c.close) };
+    // clamp: reject candles that land absurdly far from the current mark
+    if (rc.close > mk * 8 || rc.close < mk / 8) continue;
+    // guard against a single spiky high/low blowing the axis
+    rc.high = Math.min(rc.high, mk * 8);
+    rc.low = Math.max(rc.low, mk / 8);
+    out.push(rc);
+  }
+  return out.length ? out : candles.map((c) => ({ time: c.time, open: r2(c.open), high: r2(c.high), low: r2(c.low), close: r2(c.close) }));
 }
 
 // Public burn stats: what the burn engine owes, what it has already destroyed.
