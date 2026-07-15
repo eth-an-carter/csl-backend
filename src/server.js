@@ -298,22 +298,48 @@ app.get("/api/burn", async (_req, res) => {
 });
 
 // Daily history for long-range charts. real:true only with STEAMWEBAPI_KEY.
+// Only trust Steam history when the skin ACTUALLY trades on Steam near its true
+// price. Steam caps listings at ~$1800, so a Dragon Lore (~$6k) or a Howl
+// (~$4.3k) shows an OLD, low history from before it hit the ceiling — rebasing
+// that onto $6k invents a decade of fake movement. We compare Steam's recent
+// real level to our mark: if they're within range, the history is genuine and
+// we serve it; if Steam is a fraction of the mark, the skin has outgrown Steam
+// and we decline (real:false) so the terminal shows a short live window instead.
+const STEAM_TRUST_RATIO = Number(process.env.STEAM_TRUST_RATIO || 2.5);
+
+function steamHistoryIsGenuine(candles, mk) {
+  if (!Array.isArray(candles) || candles.length < 10 || !mk || mk <= 0) return false;
+  const recent = candles.slice(-30).map((c) => c.close).filter((n) => n > 0).sort((a, b) => a - b);
+  if (!recent.length) return false;
+  const level = recent[Math.floor(recent.length / 2)]; // median of the last ~30 real closes
+  const ratio = mk > level ? mk / level : level / mk;
+  return ratio <= STEAM_TRUST_RATIO;
+}
+
 app.get("/api/history/:key", async (req, res) => {
   const m = MARKETS.find((x) => x.key === req.params.key);
   if (!m) return res.status(404).json({ error: "not_found" });
   const mk = markOf(m.key);
-  // 1) Steam Market full history (cached; kick off fetch if cold)
+  // 1) Steam Market full history — served ONLY if the skin still trades on Steam
+  //    near its true price (see steamHistoryIsGenuine)
   if (steamChartEnabled()) {
     const cached = getSteamHistoryCached(m.hash);
-    if (cached && cached.length)
-      return res.json({ key: m.key, real: true, source: "steam", basis: "csl-mark", tf: 86400, candles: rebaseToMark(cached, mk) });
+    if (cached && cached.length) {
+      if (steamHistoryIsGenuine(cached, mk))
+        return res.json({ key: m.key, real: true, source: "steam", basis: "csl-mark", tf: 86400, candles: rebaseToMark(cached, mk) });
+      // outgrew Steam (DLore, Howl, knives) — don't fake a decade of history
+      return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
+    }
     fetchSteamHistory(m.hash); // warm in background; don't block the request
   }
-  // 2) steamwebapi (if key set)
+  // 2) steamwebapi (if key set) — same trust gate
   if (historyEnabled()) {
     const candles = await fetchDailyHistory(m.hash);
-    if (candles && candles.length)
-      return res.json({ key: m.key, real: true, source: "steamwebapi", basis: "csl-mark", tf: 86400, candles: rebaseToMark(candles, mk) });
+    if (candles && candles.length) {
+      if (steamHistoryIsGenuine(candles, mk))
+        return res.json({ key: m.key, real: true, source: "steamwebapi", basis: "csl-mark", tf: 86400, candles: rebaseToMark(candles, mk) });
+      return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
+    }
   }
   res.json({ key: m.key, real: false, tf: 86400, candles: [] });
 });
