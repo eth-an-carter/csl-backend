@@ -7,7 +7,7 @@ import { seedCandles, pushTick, getCandles, getLastCandle, CANDLE_TF_SEC } from 
 import { refreshOracle, pushMockSpot, markOf as oracleMark, markAgeOf as oracleMarkAge, isStale as oracleStale, seedMark, oracleSnapshot, oracleSources } from "./oracle.js";
 import { csfloatDiag } from "./csfloat.js";
 import { fetchDailyHistory, historyEnabled } from "./history.js";
-import { fetchSteamHistory, getSteamHistoryCached, steamChartEnabled, warmSteamHistory } from "./steamchart.js";
+import { fetchSteamHistory, getSteamHistoryCached, getSteamIconCached, steamChartEnabled, warmSteamHistory } from "./steamchart.js";
 import { fetchInventory } from "./inventory.js";
 import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples } from "./db.js";
 import { requireAuth, authEnabled } from "./auth.js";
@@ -99,6 +99,8 @@ async function restoreRings() {
     console.warn("[24h] restore failed:", e.message);
   }
 }
+function safeIcon(hash) { try { return getSteamIconCached(hash) || null; } catch { return null; } }
+
 function change24hOf(key, price) {
   const arr = ring.get(key);
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
@@ -210,7 +212,7 @@ app.get("/api/markets", (_req, res) => {
     const change = change24hOf(m.key, s.price);
     return {
       key: m.key, name: m.name, image: m.image, price: s.price,
-      wear: s.wear, icon: getSteamIconCached(m.hash), change24h: change, funding: s.funding, updatedAt: s.updatedAt,
+      wear: s.wear, icon: safeIcon(m.hash), change24h: change, funding: s.funding, updatedAt: s.updatedAt,
     };
   });
   res.json({ mock: IS_MOCK, source: SOURCE, tf: CANDLE_TF_SEC, nextFunding: nextFundingTs(), markets: list });

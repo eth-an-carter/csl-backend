@@ -47,35 +47,45 @@ export function fetchSteamHistory(hash) {
 }
 
 async function doFetch(hash) {
+  const cookie = process.env.STEAM_LOGIN_SECURE;
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    Referer: `https://steamcommunity.com/market/listings/730/${encodeURIComponent(hash)}`,
+  };
+  if (cookie) headers.Cookie = `steamLoginSecure=${cookie}`;
+
+  // 1) icon — cheap, from the item page (best-effort, never blocks history)
+  let icon = cache.get(hash)?.icon || null;
   try {
-    const url = `https://steamcommunity.com/market/listings/730/${encodeURIComponent(hash)}`;
-    const headers = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
-      Accept: "text/html",
-      "Accept-Language": "en-US,en;q=0.9",
-    };
-    if (process.env.STEAM_LOGIN_SECURE) headers.Cookie = `steamLoginSecure=${process.env.STEAM_LOGIN_SECURE}`;
+    const pg = await fetch(`https://steamcommunity.com/market/listings/730/${encodeURIComponent(hash)}`, { headers });
+    if (pg.ok) {
+      const html = await pg.text();
+      const im = html.match(/"icon_url":"([^"]+)"/);
+      if (im) icon = `https://community.cloudflare.steamstatic.com/economy/image/${im[1]}/128fx128f`;
+    }
+  } catch { /* ignore icon failures */ }
+
+  // 2) full price history — the dedicated JSON endpoint. Requires a logged-in
+  //    cookie; returns EVERY sale since the item first listed.
+  try {
+    const url = `https://steamcommunity.com/market/pricehistory/?appid=730&currency=1&market_hash_name=${encodeURIComponent(hash)}`;
     const res = await fetch(url, { headers });
     if (!res.ok) {
-      console.warn(`[steamchart] ${res.status} for ${hash}`);
-      return cache.get(hash)?.candles || null; // keep stale cache on failure
+      console.warn(`[steamchart] pricehistory ${res.status} for ${hash}${res.status === 400 || res.status === 401 ? " (cookie missing/expired?)" : ""}`);
+      if (icon) cache.set(hash, { at: Date.now(), candles: cache.get(hash)?.candles || [], icon });
+      return cache.get(hash)?.candles || null;
     }
-    const html = await res.text();
-    // the item's own icon, straight out of the page's asset description
-    let icon = null;
-    const im = html.match(/"icon_url":"([^"]+)"/);
-    if (im) icon = `https://community.cloudflare.steamstatic.com/economy/image/${im[1]}/128fx128f`;
-
-    const m = html.match(/var line1\s*=\s*(\[\[.*?\]\]);/s);
-    if (!m) {
-      console.warn(`[steamchart] no line1 for ${hash}`);
+    const data = await res.json();
+    const raw = data && data.prices;
+    if (!Array.isArray(raw) || !raw.length) {
+      console.warn(`[steamchart] empty pricehistory for ${hash} (success=${data && data.success})`);
       if (icon) cache.set(hash, { at: Date.now(), candles: cache.get(hash)?.candles || [], icon });
       return null;
     }
-    let raw;
-    try { raw = JSON.parse(m[1]); } catch { return null; }
 
-    // entries: ["Aug 14 2013 01: +0", 4.203, "1"] -> daily OHLC
+    // entries: ["Aug 14 2013 01: +0", "4.203", "1"] -> daily OHLC
     const byDay = new Map();
     for (const row of raw) {
       if (!Array.isArray(row) || row.length < 2) continue;
@@ -91,7 +101,7 @@ async function doFetch(hash) {
     const candles = [...byDay.values()].sort((a, b) => a.time - b.time);
     if (!candles.length) return null;
     cache.set(hash, { at: Date.now(), candles, icon });
-    console.log(`[steamchart] ${hash}: ${candles.length} daily candles (${new Date(candles[0].time * 1000).toISOString().slice(0, 10)} → now)${icon ? " + icon" : ""}`);
+    console.log(`[steamchart] ${hash}: ${candles.length} daily candles (${new Date(candles[0].time * 1000).toISOString().slice(0, 10)} \u2192 now)${icon ? " + icon" : ""}`);
     return candles;
   } catch (e) {
     console.warn("[steamchart] error:", e.message);
