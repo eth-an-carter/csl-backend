@@ -1,7 +1,7 @@
 {
   "name": "csl-backend",
   "version": "1.0.0",
-  "description": "CSL backend \u2014 oracle, perps engine, USDC settlement (build 7ef56b9+1)",
+  "description": "CSL backend \u2014 oracle, perps engine, USDG settlement (build 7ef56b9+1)",
   "type": "module",
   "main": "src/server.js",
   "scripts": {
