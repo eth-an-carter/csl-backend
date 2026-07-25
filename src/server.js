@@ -13,7 +13,7 @@ import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, p
 import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
-import { depositsEnabled } from "./solana.js";
+import { depositsEnabled } from "./chain.js";
 
 const PORT = process.env.PORT || 8080;
 const MOCK = process.env.MOCK !== "0"; // legacy flag
@@ -415,7 +415,7 @@ app.get("/api/admin/withdrawals/pending", requireAdmin, async (_req, res) => {
 app.post("/api/admin/withdrawals/:id/reject", requireAdmin, async (req, res) => {
   res.json(await rejectWithdrawal(String(req.params.id)));
 });
-// admin: list deposit addresses holding USDC + sweep them to treasury
+// admin: list deposit addresses holding USDG + sweep them to treasury
 app.get("/api/admin/deposits/balances", requireAdmin, async (_req, res) => {
   res.json(await depositAddressesWithBalances());
 });

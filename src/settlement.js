@@ -4,11 +4,8 @@
 //   withdrawals — requests always recorded; auto-payout when TREASURY_SECRET is set
 //   vault       — accepts deposits only when VAULT_OPEN=1
 import { pool, ensureUser } from "./db.js";
-import { connection, depositsEnabled, depositAddress, incomingUsdcTransfers, USDC_MINT, USDC_DECIMALS, sweepDepositToTreasury, usdcBalanceOf, solBalanceOf, treasuryPubkey } from "./solana.js";
-import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
-import { getOrCreateAssociatedTokenAccount, createTransferInstruction } from "@solana/spl-token";
+import { publicClient, depositsEnabled, depositAddress, incomingUsdgTransfers, usdgBalanceOf, sweepDepositToTreasury, payWithdrawal, treasuryAddress, isValidAddress } from "./chain.js";
 import { randomUUID } from "crypto";
-import bs58 from "bs58";
 
 const MIN_WITHDRAW = Number(process.env.MIN_WITHDRAW || 5);
 const MAX_AUTO_WITHDRAW = Number(process.env.MAX_AUTO_WITHDRAW || 100); // above this stays pending for manual approval
@@ -68,13 +65,7 @@ export async function scanDeposits() {
     try {
       const addr = depositAddress(privy_id);
 
-      // walk recent signatures; stop early at the last one we already credited
-      const lastSig = (await pool.query(
-        `SELECT sig FROM deposits WHERE privy_id=$1 AND sig IS NOT NULL ORDER BY credited_at DESC LIMIT 1`,
-        [privy_id]
-      )).rows[0]?.sig || undefined;
-
-      const transfers = await incomingUsdcTransfers(addr, { limit: 25, until: lastSig });
+      const transfers = await incomingUsdgTransfers(addr, {});
       if (!transfers.length) continue;
 
       // oldest → newest so credits apply in chain order
@@ -98,10 +89,10 @@ export async function scanDeposits() {
             await client.query(
               `INSERT INTO deposits (id, privy_id, amount, address, sig, slot, credited_at)
                VALUES ($1,$2,0,$3,$4,$5,$6) ON CONFLICT (sig) DO NOTHING`,
-              [randomUUID(), privy_id, addr, t.sig, t.slot, Date.now()]
+              [randomUUID(), privy_id, addr, t.sig, t.block, Date.now()]
             );
             await client.query("COMMIT");
-            console.warn(`[deposits] ${privy_id} over cap; sig ${t.sig} recorded, ${t.amount} USDC left on address`);
+            console.warn(`[deposits] ${privy_id} over cap; ${t.sig} recorded, ${t.amount} USDG left on address`);
             continue;
           }
 
@@ -109,13 +100,13 @@ export async function scanDeposits() {
           const ins = await client.query(
             `INSERT INTO deposits (id, privy_id, amount, address, sig, slot, credited_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (sig) DO NOTHING RETURNING id`,
-            [randomUUID(), privy_id, allowed, addr, t.sig, t.slot, Date.now()]
+            [randomUUID(), privy_id, allowed, addr, t.sig, t.block, Date.now()]
           );
           if (ins.rowCount === 0) { await client.query("ROLLBACK"); continue; } // already credited
 
           await client.query(`UPDATE users SET balance=balance+$2 WHERE privy_id=$1`, [privy_id, allowed]);
           await client.query("COMMIT");
-          console.log(`[deposits] +${allowed} USDC to ${privy_id} (sig ${t.sig})`);
+          console.log(`[deposits] +${allowed} USDG to ${privy_id} (${t.sig})`);
         } catch (e) {
           await client.query("ROLLBACK").catch(() => {});
           // unique-violation means concurrent scan already credited it — safe to ignore
@@ -131,17 +122,11 @@ export async function scanDeposits() {
 }
 
 // ---- withdrawals --------------------------------------------------------------
-function treasuryKeypair() {
-  const sec = process.env.TREASURY_SECRET || "";
-  if (!sec) return null;
-  try { return Keypair.fromSecretKey(bs58.decode(sec)); } catch { return null; }
-}
-
 export async function requestWithdrawal(privyId, amount, address) {
   amount = Math.floor(Number(amount) * 100) / 100;
   if (!Number.isFinite(amount) || amount < MIN_WITHDRAW) return { error: "min_withdraw", min: MIN_WITHDRAW };
-  let dest;
-  try { dest = new PublicKey(String(address)); } catch { return { error: "bad_address" }; }
+  const dest = String(address || "").trim();
+  if (!isValidAddress(dest)) return { error: "bad_address" };
 
   const dayAgo = Date.now() - 86_400_000;
 
@@ -170,40 +155,30 @@ export async function requestWithdrawal(privyId, amount, address) {
     await client.query(`UPDATE users SET balance=balance-$2 WHERE privy_id=$1`, [privyId, amount]);
     await client.query(
       `INSERT INTO withdrawals (id, privy_id, amount, address, status, created_at) VALUES ($1,$2,$3,$4,'pending',$5)`,
-      [id, privyId, amount, dest.toBase58(), Date.now()]
+      [id, privyId, amount, dest, Date.now()]
     );
     await client.query("COMMIT");
 
     // auto-payout small withdrawals when the treasury key is configured AND
     // the house-wide hourly auto-payout budget still has room (drain protection)
-    const treasury = treasuryKeypair();
+    const treasury = treasuryAddress();
     const hourAgo = Date.now() - 3_600_000;
     const houseHour = Number((await pool.query(
       `SELECT coalesce(sum(amount),0) s FROM withdrawals WHERE status='sent' AND created_at > $1`, [hourAgo]
     )).rows[0].s);
     const houseRoom = MAX_WITHDRAW_HOUSE_HOUR - houseHour;
 
-    if (treasury && connection && amount <= MAX_AUTO_WITHDRAW && amount <= houseRoom) {
+    if (treasuryAddress() && process.env.TREASURY_PRIVKEY && publicClient && amount <= MAX_AUTO_WITHDRAW && amount <= houseRoom) {
       // mark 'processing' FIRST so a crash mid-send never lets a retry pay twice.
-      // Only a confirmed on-chain tx flips it to 'sent'; failures go back to 'pending'.
       const claim = await pool.query(
         `UPDATE withdrawals SET status='processing' WHERE id=$1 AND status='pending' RETURNING id`, [id]
       );
-      if (claim.rowCount === 0) return { ok: true, status: "pending" }; // someone else grabbed it
+      if (claim.rowCount === 0) return { ok: true, status: "pending" };
       try {
-        const fromAta = await getOrCreateAssociatedTokenAccount(connection, treasury, USDC_MINT, treasury.publicKey);
-        const toAta = await getOrCreateAssociatedTokenAccount(connection, treasury, USDC_MINT, dest);
-        const ix = createTransferInstruction(fromAta.address, toAta.address, treasury.publicKey, BigInt(Math.round(amount * 10 ** USDC_DECIMALS)));
-        const tx = new Transaction().add(ix);
-        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-        tx.recentBlockhash = blockhash;
-        tx.feePayer = treasury.publicKey;
-        const sig = await connection.sendTransaction(tx, [treasury], { maxRetries: 3 });
-        // wait for on-chain confirmation before declaring success
-        const conf = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
-        if (conf.value?.err) throw new Error("tx failed on-chain: " + JSON.stringify(conf.value.err));
-        await pool.query(`UPDATE withdrawals SET status='sent', sig=$2 WHERE id=$1`, [id, sig]);
-        return { ok: true, status: "sent", sig };
+        const hash = await payWithdrawal(dest, amount);
+        await publicClient.waitForTransactionReceipt({ hash });
+        await pool.query(`UPDATE withdrawals SET status='sent', sig=$2 WHERE id=$1`, [id, hash]);
+        return { ok: true, status: "sent", sig: hash };
       } catch (e) {
         // roll the request back to pending for manual handling; balance stays debited
         // (funds are NOT lost — admin can reject to refund, or retry the payout)
@@ -278,22 +253,21 @@ export async function vaultDeposit(privyId, amount) {
 // admin can see what's sitting uncollected across deposit addresses.
 export async function depositAddressesWithBalances() {
   if (!depositsEnabled()) return { enabled: false, addresses: [] };
-  if (!treasuryPubkey()) return { enabled: true, treasury: null, error: "no_treasury", addresses: [] };
+  if (!treasuryAddress()) return { enabled: true, treasury: null, error: "no_treasury", addresses: [] };
   const users = (await pool.query(`SELECT privy_id FROM users`)).rows;
   const out = [];
-  let totalUsdc = 0;
+  let totalUsdg = 0;
   for (const { privy_id } of users) {
     const address = depositAddress(privy_id);
-    let usdc = 0, sol = 0;
-    try { usdc = await usdcBalanceOf(address); } catch {}
-    try { sol = await solBalanceOf(address); } catch {}
-    if (usdc > 0 || sol > 0) {
-      out.push({ privyId: privy_id, address, usdc, sol, canSweep: usdc >= 0.5 && sol >= 0.001 });
-      totalUsdc += usdc;
+    let usdg = 0;
+    try { usdg = await usdgBalanceOf(address); } catch {}
+    if (usdg > 0) {
+      out.push({ privyId: privy_id, address, usdg, canSweep: usdg >= 0.5 });
+      totalUsdg += usdg;
     }
   }
-  out.sort((a, b) => b.usdc - a.usdc);
-  return { enabled: true, treasury: treasuryPubkey().toBase58(), totalUsdc: Math.round(totalUsdc * 100) / 100, count: out.length, addresses: out };
+  out.sort((a, b) => b.usdg - a.usdg);
+  return { enabled: true, treasury: treasuryAddress(), totalUsdg: Math.round(totalUsdg * 100) / 100, count: out.length, addresses: out };
 }
 
 // Sweeps every user's deposit address that has enough USDC (and SOL for the fee)
@@ -301,16 +275,15 @@ export async function depositAddressesWithBalances() {
 // empty addresses are skipped, and each sweep waits for on-chain confirmation.
 export async function sweepAllDeposits() {
   if (!depositsEnabled()) return { error: "deposits_disabled" };
-  if (!treasuryPubkey()) return { error: "no_treasury" };
+  if (!treasuryAddress()) return { error: "no_treasury" };
   const users = (await pool.query(`SELECT privy_id FROM users`)).rows;
   const results = [];
   let swept = 0, total = 0;
   for (const { privy_id } of users) {
-    const r = await sweepDepositToTreasury(privy_id, { minSweep: 0.5 });
-    if (r.ok) { swept++; total += r.amount; results.push({ privyId: privy_id, ok: true, amount: r.amount, sig: r.sig }); }
-    else if (r.error !== "no_usdc" && r.error !== "below_min") {
-      results.push({ privyId: privy_id, ok: false, error: r.error, ...(r.address ? { address: r.address } : {}) });
-    }
+    try {
+      const r = await sweepDepositToTreasury(privy_id);
+      if (r && r.hash) { swept++; total += r.amount; results.push({ privyId: privy_id, ok: true, amount: r.amount, sig: r.hash }); }
+    } catch (e) { results.push({ privyId: privy_id, ok: false, error: e.message }); }
   }
-  return { ok: true, swept, totalUsdc: Math.round(total * 100) / 100, results };
+  return { ok: true, swept, totalUsdg: Math.round(total * 100) / 100, results };
 }

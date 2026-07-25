@@ -1,24 +1,15 @@
-// Privy token verification. The frontend sends the user's Privy access token
-// as Authorization: Bearer <token>; we verify it and attach req.privyId.
-import { PrivyClient } from "@privy-io/server-auth";
+// Wallet-address auth for Robinhood Chain. The frontend sends the connected
+// wallet address as the `x-wallet` header. We normalise it and attach it as
+// req.account. (For production, upgrade to SIWE: have the wallet sign a nonce
+// and verify the signature here — the shape below stays the same.)
+export function authEnabled() { return true; }
 
-const APP_ID = process.env.PRIVY_APP_ID || "cmr6oo33w00w00cjxl9thvmh3";
-const APP_SECRET = process.env.PRIVY_APP_SECRET || "";
-
-const privy = APP_SECRET ? new PrivyClient(APP_ID, APP_SECRET) : null;
-
-export function authEnabled() { return Boolean(privy); }
+function isAddress(a) { return typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a); }
 
 export async function requireAuth(req, res, next) {
-  if (!privy) return res.status(503).json({ error: "auth_not_configured" });
-  const h = req.headers.authorization || "";
-  const token = h.startsWith("Bearer ") ? h.slice(7) : null;
-  if (!token) return res.status(401).json({ error: "no_token" });
-  try {
-    const claims = await privy.verifyAuthToken(token);
-    req.privyId = claims.userId;
-    next();
-  } catch {
-    res.status(401).json({ error: "bad_token" });
-  }
+  const w = (req.headers["x-wallet"] || "").toString().trim().toLowerCase();
+  if (!isAddress(w)) return res.status(401).json({ error: "no_wallet" });
+  req.account = w;          // canonical account id = lowercased wallet address
+  req.privyId = w;          // back-compat: existing code keys accounts by this
+  next();
 }
