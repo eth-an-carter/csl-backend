@@ -60,11 +60,22 @@ export async function fetchLivePrices(hashes) {
 
 // Mock random-walk tick — realistic live movement around a reference price.
 // vol = per-tick volatility fraction (e.g. 0.004 = 0.4%).
+//
+// The old version pinned prices to `seed` with a strong 2%/tick pull, so every
+// market's 24h change collapsed toward ~0% (nothing could wander far enough to
+// register a real daily move). We now let price roam in a wider band around
+// seed with much weaker reversion, so 24h changes look alive — some markets
+// green, some red, a few running several percent — while still not drifting off
+// to infinity. Bigger per-tick shock, softer pull, wider clamp.
 export function mockTick(prev, seed, vol = 0.004) {
   const base = prev ?? seed;
-  // gentle mean-reversion toward seed so prices don't drift away forever
-  const drift = (seed - base) * 0.02;
-  const shock = base * vol * (Math.random() * 2 - 1);
-  const next = Math.max(base * 0.5, base + drift + shock);
+  // weak mean-reversion (0.4%/tick) — enough to keep it near seed over the long
+  // run, gentle enough to allow multi-percent daily swings.
+  const drift = (seed - base) * 0.004;
+  // ~2.5x the old shock so real daily movement accumulates.
+  const shock = base * vol * 2.5 * (Math.random() * 2 - 1);
+  // allow ±35% wandering from seed before the clamp bites (was -50% floor only).
+  const lo = seed * 0.65, hi = seed * 1.35;
+  const next = Math.min(hi, Math.max(lo, base + drift + shock));
   return Math.round(next * 100) / 100;
 }
