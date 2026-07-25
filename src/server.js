@@ -9,7 +9,7 @@ import { csfloatDiag } from "./csfloat.js";
 import { fetchDailyHistory, historyEnabled } from "./history.js";
 import { fetchSteamHistory, getSteamHistoryCached, getSteamIconCached, steamChartEnabled, warmSteamHistory } from "./steamchart.js";
 import { fetchInventory } from "./inventory.js";
-import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples } from "./db.js";
+import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses } from "./db.js";
 import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
@@ -56,6 +56,7 @@ setInterval(() => {
 // ---- in-memory state -------------------------------------------------------
 const state = new Map(); // key -> { key,name,image,price,prevClose,funding,updatedAt }
 const ring = new Map(); // key -> [{t,price}] samples ~5min apart, spanning 24h+
+const ownDaily = new Map(); // key -> [{time,open,high,low,close}] CSL's own real daily closes, never pruned
 for (const m of MARKETS) {
   state.set(m.key, {
     key: m.key,
@@ -82,6 +83,22 @@ function sampleRing(key, price) {
   }
   // keep ~26h of 5-min samples
   while (arr.length > 320) arr.shift();
+
+  // CSL's own daily close — never pruned, grows forever. This is what gets
+  // spliced onto the tail of a skin's history once it outgrows Steam's $1800
+  // cap (see /api/history/:key). Upserts today's bucket on every tick, so the
+  // row finalizes into a real close once the day rolls over.
+  const day = Math.floor(now / 86400000) * 86400000;
+  const daySec = Math.floor(day / 1000);
+  const own = ownDaily.get(key) || [];
+  const last = own[own.length - 1];
+  if (last && last.time === daySec) {
+    last.high = Math.max(last.high, price); last.low = Math.min(last.low, price); last.close = price;
+  } else {
+    own.push({ time: daySec, open: price, high: price, low: price, close: price });
+    ownDaily.set(key, own);
+  }
+  saveDailyClose(key, daySec, price).catch(() => {});
 }
 
 // Rehydrate the ring from the DB on boot, then prune the old rows hourly.
@@ -94,12 +111,22 @@ async function restoreRings() {
       if (ring.has(key)) { ring.set(key, arr); n += arr.length; }
     }
     console.log(`[24h] restored ${n} price samples from db`);
+    const daily = await loadDailyCloses();
+    let dn = 0;
+    for (const [key, arr] of daily) { ownDaily.set(key, arr); dn += arr.length; }
+    console.log(`[history] restored ${dn} own daily closes from db (${daily.size} markets)`);
     setInterval(() => prunePriceSamples().catch(() => {}), 60 * 60 * 1000);
   } catch (e) {
     console.warn("[24h] restore failed:", e.message);
   }
 }
 function safeIcon(hash) { try { return getSteamIconCached(hash) || null; } catch { return null; } }
+
+// No skin realistically moves more than this in 24h — a computed change past
+// this is treated as a bad/stale reference (e.g. a DB sample from before a
+// manual seed-price correction), not a real move, and we fall through instead
+// of displaying it.
+const CHANGE24H_MAX = 45;
 
 function change24hOf(key, price) {
   const arr = ring.get(key);
@@ -108,7 +135,12 @@ function change24hOf(key, price) {
   if (arr && arr.length) {
     let ref = null;
     for (const s of arr) { if (s.t <= cutoff) ref = s; else break; }
-    if (ref && ref.price) return ((price - ref.price) / ref.price) * 100;
+    if (ref && ref.price > 0) {
+      const chg = ((price - ref.price) / ref.price) * 100;
+      if (Math.abs(chg) <= CHANGE24H_MAX) return chg;
+      // implausible vs. this reference (stale/glitched sample) — don't trust it,
+      // fall through to the Steam-history method below instead.
+    }
   }
   // 2) cold ring (fresh deploy, DB empty): day-over-day from the Steam daily
   //    series. It is a RATIO of two consecutive closes, so the basis cancels —
@@ -122,12 +154,15 @@ function change24hOf(key, price) {
       const last = hist[i]?.close, prev = hist[i - 1]?.close;
       if (prev > 0 && last > 0) {
         const chg = ((last - prev) / prev) * 100;
-        if (Math.abs(chg) <= 40) return chg; // believable daily move
+        if (Math.abs(chg) <= CHANGE24H_MAX) return chg; // believable daily move
       }
     }
   }
-  // 3) nothing to compare against yet
-  if (arr && arr.length && arr[0].price) return ((price - arr[0].price) / arr[0].price) * 100;
+  // 3) nothing reliable to compare against — same sanity check applies
+  if (arr && arr.length && arr[0].price > 0) {
+    const chg = ((price - arr[0].price) / arr[0].price) * 100;
+    if (Math.abs(chg) <= CHANGE24H_MAX) return chg;
+  }
   return 0;
 }
 
@@ -316,10 +351,46 @@ function steamHistoryIsGenuine(candles, mk) {
   return ratio <= STEAM_TRUST_RATIO;
 }
 
+// Steam Community Market refuses to list anything above ~$1800 — so once a
+// skin's real value crosses that line, it simply stops trading on Steam and
+// the history is either dead or (worse) shows old low prices from before it
+// hit the ceiling. That EARLY segment (while it was still under the cap) is
+// 100% genuine and needs no rebasing — we just cut the series off right at
+// the cap instead of throwing all of it away.
+const STEAM_LISTING_CAP = Number(process.env.STEAM_LISTING_CAP || 1800);
+const STEAM_CAP_SAFETY = 0.95; // stay a bit under the hard cap, fees etc.
+
+function realPreCapSegment(candles) {
+  if (!Array.isArray(candles) || !candles.length) return [];
+  const cap = STEAM_LISTING_CAP * STEAM_CAP_SAFETY;
+  const out = [];
+  for (const c of candles) {
+    if (c.close > 0 && c.close <= cap) out.push(c);
+    else break; // stop at the first candle that crosses the cap — rest is not genuine
+  }
+  return out;
+}
+
+// Splice: [real Steam candles from before the skin crossed the cap] + [gap] +
+// [CSL's own real daily closes, collected since launch]. Nothing here is
+// rebased or invented — both segments are true dollar prices for their own
+// era. The gap between them is real (Steam has no data there) and is
+// reported explicitly so the frontend can draw it honestly instead of
+// pretending the line is continuous.
+function spliceHistory(steamCandles, ownCandles) {
+  const pre = realPreCapSegment(steamCandles);
+  const own = Array.isArray(ownCandles) ? ownCandles : [];
+  if (!pre.length && !own.length) return null;
+  const candles = [...pre, ...own].sort((a, b) => a.time - b.time);
+  const gap = pre.length && own.length ? { from: pre[pre.length - 1].time, to: own[0].time } : null;
+  return { candles, gap };
+}
+
 app.get("/api/history/:key", async (req, res) => {
   const m = MARKETS.find((x) => x.key === req.params.key);
   if (!m) return res.status(404).json({ error: "not_found" });
   const mk = markOf(m.key);
+  const own = ownDaily.get(m.key) || [];
   // 1) Steam Market full history — served ONLY if the skin still trades on Steam
   //    near its true price (see steamHistoryIsGenuine)
   if (steamChartEnabled()) {
@@ -327,7 +398,11 @@ app.get("/api/history/:key", async (req, res) => {
     if (cached && cached.length) {
       if (steamHistoryIsGenuine(cached, mk))
         return res.json({ key: m.key, real: true, source: "steam", basis: "csl-mark", tf: 86400, candles: rebaseToMark(cached, mk) });
-      // outgrew Steam (DLore, Howl, knives) — don't fake a decade of history
+      // outgrew Steam (DLore, Howl, knives): splice genuine pre-cap Steam
+      // history onto our own real daily closes instead of discarding it all
+      const spliced = spliceHistory(cached, own);
+      if (spliced)
+        return res.json({ key: m.key, real: true, source: "spliced", reason: "outgrew_steam", tf: 86400, ...spliced });
       return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
     }
     fetchSteamHistory(m.hash); // warm in background; don't block the request
@@ -338,9 +413,15 @@ app.get("/api/history/:key", async (req, res) => {
     if (candles && candles.length) {
       if (steamHistoryIsGenuine(candles, mk))
         return res.json({ key: m.key, real: true, source: "steamwebapi", basis: "csl-mark", tf: 86400, candles: rebaseToMark(candles, mk) });
+      const spliced = spliceHistory(candles, own);
+      if (spliced)
+        return res.json({ key: m.key, real: true, source: "spliced", reason: "outgrew_steam", tf: 86400, ...spliced });
       return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
     }
   }
+  // 3) no Steam data at all (cold cache / disabled) — still serve whatever
+  //    real history CSL itself has collected, honestly labelled
+  if (own.length) return res.json({ key: m.key, real: true, source: "csl", tf: 86400, candles: own });
   res.json({ key: m.key, real: false, tf: 86400, candles: [] });
 });
 

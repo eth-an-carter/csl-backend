@@ -58,6 +58,16 @@ export async function initDb() {
       PRIMARY KEY (key, t)
     );
     CREATE INDEX IF NOT EXISTS price_samples_key_t_idx ON price_samples(key, t DESC);
+    -- CSL's OWN daily close history. Never pruned — this is real, grows forever,
+    -- and is what we splice onto the tail of a skin's Steam history once that
+    -- skin has outgrown Steam's $1800 listing cap (see steamHistoryIsGenuine).
+    CREATE TABLE IF NOT EXISTS daily_closes (
+      key   text NOT NULL,
+      day   bigint NOT NULL,   -- unix seconds, start of UTC day
+      close double precision NOT NULL,
+      PRIMARY KEY (key, day)
+    );
+    CREATE INDEX IF NOT EXISTS daily_closes_key_day_idx ON daily_closes(key, day ASC);
     -- every dollar owed to the burn engine, recorded as it is earned
     CREATE TABLE IF NOT EXISTS burn_ledger (
       id         text PRIMARY KEY,
@@ -101,6 +111,33 @@ export async function savePriceSample(key, t, price) {
 export async function prunePriceSamples() {
   if (!pool) return;
   await pool.query(`DELETE FROM price_samples WHERE t < $1`, [Date.now() - 26 * 60 * 60 * 1000]);
+}
+
+/* ---- CSL's own daily close history — never pruned, grows forever --------- */
+
+// Upsert today's running close (called on every price sample). The row for
+// "day" keeps overwriting until the day rolls over, at which point it's a
+// locked-in real daily close — same idea as a candle finalizing at the end
+// of its bucket.
+export async function saveDailyClose(key, day, close) {
+  if (!pool) return;
+  await pool.query(
+    `INSERT INTO daily_closes (key, day, close) VALUES ($1, $2, $3)
+     ON CONFLICT (key, day) DO UPDATE SET close = EXCLUDED.close`,
+    [key, day, close]
+  );
+}
+
+// All CSL-native daily closes for every market, oldest first per key.
+export async function loadDailyCloses() {
+  if (!pool) return new Map();
+  const rows = (await pool.query(`SELECT key, day, close FROM daily_closes ORDER BY key, day ASC`)).rows;
+  const m = new Map();
+  for (const r of rows) {
+    if (!m.has(r.key)) m.set(r.key, []);
+    m.get(r.key).push({ time: Number(r.day), open: Number(r.close), high: Number(r.close), low: Number(r.close), close: Number(r.close) });
+  }
+  return m;
 }
 
 export async function ensureUser(privyId) {
