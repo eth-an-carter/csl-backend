@@ -10,7 +10,7 @@
 // - image:    filename served by the FRONTEND from /public
 // - seed:     fallback / mock reference price in USD
 export const MARKETS = [
-  { key: "dragon-lore",     name: "AWP | Dragon Lore",            wear: "FT", hash: "AWP | Dragon Lore (Field-Tested)",              image: "cs2-awp-dragon-lore.png",      seed: 12250 },
+  { key: "dragon-lore",     name: "AWP | Dragon Lore",            wear: "FT", hash: "AWP | Dragon Lore (Field-Tested)",              image: "cs2-awp-dragon-lore.png",      seed: 6900  },
   { key: "howl",            name: "M4A4 | Howl",                  wear: "FT", hash: "M4A4 | Howl (Field-Tested)",                    image: "cs2-m4a4-howl.png",            seed: 5450  },
   { key: "karambit-fade",   name: "★ Karambit | Fade",            wear: "FN", hash: "★ Karambit | Fade (Factory New)",               image: "cs2-karambit-fade-knife.jpg",  seed: 2680  },
   { key: "butterfly",       name: "★ Butterfly Knife | Doppler",  wear: "FN", hash: "★ Butterfly Knife | Doppler (Factory New)",     image: "cs2-butterfly-knife.jpg",      seed: 1840  },
