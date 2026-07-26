@@ -96,6 +96,23 @@ async function doFetch(hash) {
       return null;
     }
 
+    // We asked for currency=1 (USD), but an AUTHENTICATED session can make
+    // Steam silently ignore that and return the logged-in account's OWN
+    // wallet currency instead — e.g. a currency that hyperinflated/devalued
+    // over the item's history, so the same real value prints as wildly
+    // different "numbers" across years (this is what was corrupting every
+    // chart: $85 one year, $900,000+ another, for the SAME skin). Steam tells
+    // us which currency it actually used via price_prefix/price_suffix — if
+    // that isn't a plain "$", the whole series is untrustworthy and we must
+    // not parse it as dollars.
+    const prefix = String(data.price_prefix || "").trim();
+    const suffix = String(data.price_suffix || "").trim();
+    if (prefix !== "$" || suffix !== "") {
+      console.warn(`[steamchart] WRONG CURRENCY for ${hash}: Steam returned prefix="${prefix}" suffix="${suffix}" instead of "$" — the STEAM_LOGIN_SECURE account's Steam Wallet currency is not USD. Fix: on that Steam account, go to Store > Account Details > Change Currency > USD, get a fresh steamLoginSecure cookie, and update the Railway variable. Ignoring this response rather than parsing garbage as dollars.`);
+      if (icon) cache.set(hash, { at: Date.now(), candles: cache.get(hash)?.candles || [], icon });
+      return cache.get(hash)?.candles || null;
+    }
+
     // entries: ["Aug 14 2013 01: +0", "4.203", "1"] -> daily OHLC
     const byDay = new Map();
     for (const row of raw) {
@@ -111,6 +128,18 @@ async function doFetch(hash) {
     }
     const candles = [...byDay.values()].sort((a, b) => a.time - b.time);
     if (!candles.length) return null;
+
+    // Belt-and-braces: even with the currency guard above, double-check the
+    // series itself isn't internally absurd (a real skin's price never swings
+    // 1000x within its own history). Catches anything the prefix/suffix check
+    // might miss.
+    const allCloses = candles.map((c) => c.close).sort((a, b) => a - b);
+    const seriesMin = allCloses[0], seriesMax = allCloses[allCloses.length - 1];
+    if (seriesMax / seriesMin > 1000) {
+      console.warn(`[steamchart] IMPLAUSIBLE PRICE SERIES for ${hash}: min=$${seriesMin} max=$${seriesMax} (${(seriesMax / seriesMin).toFixed(0)}x spread) — likely a currency/parsing problem, not a real skin price history. Discarding rather than serving garbage.`);
+      if (icon) cache.set(hash, { at: Date.now(), candles: cache.get(hash)?.candles || [], icon });
+      return cache.get(hash)?.candles || null;
+    }
     cache.set(hash, { at: Date.now(), candles, icon });
     const lastDate = new Date(candles[candles.length - 1].time * 1000);
     const staleDays = Math.round((Date.now() - lastDate.getTime()) / 86400000);
