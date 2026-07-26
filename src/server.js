@@ -426,8 +426,15 @@ app.get("/api/history/:key", async (req, res) => {
   if (steamChartEnabled()) {
     const cached = getSteamHistoryCached(m.hash);
     if (cached && cached.length) {
-      if (steamHistoryIsGenuine(cached, mk))
-        return res.json({ key: m.key, real: true, source: "steam", basis: "csl-mark", tf: 86400, candles: rebaseToMark(cached, mk) });
+      const recent30 = cached.slice(-30).map((c) => c.close).filter((n) => n > 0).sort((a, b) => a - b);
+      const level = recent30.length ? recent30[Math.floor(recent30.length / 2)] : null;
+      const genuine = steamHistoryIsGenuine(cached, mk);
+      if (genuine) {
+        const rebased = rebaseToMark(cached, mk);
+        console.log(`[history] ${m.key}: GENUINE — mk=$${mk?.toFixed(2)} steamLevel=$${level?.toFixed(2)} ratio=${level ? (mk / level).toFixed(2) : "?"} steamCandles=${cached.length} → returning ${rebased.length} rebased candles`);
+        return res.json({ key: m.key, real: true, source: "steam", basis: "csl-mark", tf: 86400, candles: rebased });
+      }
+      console.log(`[history] ${m.key}: NOT genuine — mk=$${mk?.toFixed(2)} steamLevel=$${level?.toFixed(2)} ratio=${level ? (mk / level).toFixed(2) : "?"} (threshold=${STEAM_TRUST_RATIO}) → falling to splice`);
       // outgrew Steam (DLore, Howl, knives): splice genuine pre-cap Steam
       // history onto our own real daily closes instead of discarding it all
       const { result: spliced, stats } = spliceHistory(cached, own);
