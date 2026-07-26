@@ -21,6 +21,17 @@ export function steamChartEnabled() {
   return ENABLED;
 }
 
+// Call once at boot — makes it obvious in Railway logs whether the cookie is
+// actually loaded, without ever printing the value itself.
+export function logSteamAuthStatus() {
+  const cookie = process.env.STEAM_LOGIN_SECURE;
+  if (!cookie) {
+    console.warn("[steamchart] STEAM_LOGIN_SECURE is NOT set — Steam will serve the logged-out ~3-month window only, and any market whose price already exceeds $1800 throughout that window will show an EMPTY pre-cap history segment.");
+  } else {
+    console.log(`[steamchart] STEAM_LOGIN_SECURE is set (${cookie.length} chars) — expecting full history back to each item's release date. Watch the "[steamchart] <hash>: N daily candles (start → now)" log line per item: if "start" is only a few months ago instead of ~2013-2018, the cookie is being rejected (expired / wrong value) and Steam is silently falling back to the logged-out window.`);
+  }
+}
+
 export function getSteamHistoryCached(hash) {
   const hit = cache.get(hash);
   return hit && Date.now() - hit.at < TTL ? hit.candles : null;

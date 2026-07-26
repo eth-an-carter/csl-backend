@@ -7,7 +7,7 @@ import { seedCandles, pushTick, getCandles, getLastCandle, CANDLE_TF_SEC } from 
 import { refreshOracle, pushMockSpot, markOf as oracleMark, markAgeOf as oracleMarkAge, isStale as oracleStale, seedMark, oracleSnapshot, oracleSources } from "./oracle.js";
 import { csfloatDiag } from "./csfloat.js";
 import { fetchDailyHistory, historyEnabled } from "./history.js";
-import { fetchSteamHistory, getSteamHistoryCached, getSteamIconCached, steamChartEnabled, warmSteamHistory } from "./steamchart.js";
+import { fetchSteamHistory, getSteamHistoryCached, getSteamIconCached, steamChartEnabled, warmSteamHistory, logSteamAuthStatus } from "./steamchart.js";
 import { fetchInventory } from "./inventory.js";
 import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses } from "./db.js";
 import { requireAuth, authEnabled } from "./auth.js";
@@ -401,6 +401,7 @@ app.get("/api/history/:key", async (req, res) => {
       // outgrew Steam (DLore, Howl, knives): splice genuine pre-cap Steam
       // history onto our own real daily closes instead of discarding it all
       const spliced = spliceHistory(cached, own);
+      console.log(`[history] ${m.key}: outgrew Steam — pre-cap Steam segment=${spliced ? spliced.candles.length - own.length : 0} candles, own=${own.length} candles` + (spliced && spliced.candles.length - own.length === 0 ? " (EMPTY pre-cap segment — check STEAM_LOGIN_SECURE / the steamchart date-range log for this hash)" : ""));
       if (spliced)
         return res.json({ key: m.key, real: true, source: "spliced", reason: "outgrew_steam", tf: 86400, ...spliced });
       return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
@@ -554,6 +555,7 @@ app.listen(PORT, "0.0.0.0", () => {
   try { tick(); } catch (e) { console.error("[startup] tick:", e.message); }
   setInterval(tick, POLL_MS);
   try { warmSteamHistory(MARKETS.map((m) => m.hash)); } catch (e) { console.error("[startup] steam:", e.message); }
+  try { logSteamAuthStatus(); } catch (e) { /* diagnostic only */ }
   initDb()
     .then(() => { if (process.env.DATABASE_URL) return initSettlementTables(); })
     .then(() => restoreRings())   // table exists by now — rehydrate the 24h ring
