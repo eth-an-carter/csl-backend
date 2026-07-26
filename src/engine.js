@@ -5,6 +5,7 @@
 // counterparty. Defaults are deliberately conservative for early beta.
 import { randomUUID } from "crypto";
 import { pool, ensureUser } from "./db.js";
+import { circuitBreakerTripped } from "./oracle.js";
 
 export const MAINT_MARGIN = 0.005;
 // 0.15% of notional. Priced to fund the burn: 10% of every liquidated collateral
@@ -53,6 +54,9 @@ export async function openPosition(privyId, market, mark, { side, collateral, le
   if (!Number.isFinite(mark) || mark <= 0) return { error: "no_price" };
   // never open against a stale mark — same guard the liquidation sweep uses
   if (markAgeMs > PRICE_MAX_AGE_MS) return { error: "stale_price" };
+  // never open new exposure into a possibly-manipulated fast price move —
+  // existing positions can still close/liquidate against the real mark
+  if (circuitBreakerTripped(market.key)) return { error: "circuit_breaker", market: market.key };
 
   const notional = collateral * leverage;
   const fee = notional * TAKER_FEE;

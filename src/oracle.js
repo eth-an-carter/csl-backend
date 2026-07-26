@@ -144,10 +144,63 @@ export async function refreshOracle(markets) {
     st.mark = Math.round(st.mark * 100) / 100;
     st.sources = rs.used;
     st.updatedAt = now;
+    checkCircuitBreaker(m.key, st.mark, now);
 
     updates.push({ key: m.key, spot: st.spot, mark: st.mark, sources: rs.used });
   }
   return updates;
+}
+
+// ---------------------------------------------------------------------------
+// Circuit breaker. The median/outlier guard above protects against a single
+// source disagreeing with the others — but several of these markets only
+// have ONE active source configured (Skinport), so there's nothing to
+// disagree with. A thin orderbook on an expensive skin (Dragon Lore etc.) can
+// still move the real, multi-source-agreed mark fast and hard. This tracks
+// each key's mark over a short rolling window and trips if it moves further
+// than a sane skin ever should in that time — independent of the TWAP
+// smoothing above, which dampens the SPEED of the move but not the fact that
+// it happened.
+const CB_WINDOW_MS = Number(process.env.CIRCUIT_BREAKER_WINDOW_MS || 5 * 60_000); // 5 min
+const CB_MAX_MOVE = Number(process.env.CIRCUIT_BREAKER_MAX_MOVE || 0.15); // 15% within the window
+const CB_COOLDOWN_MS = Number(process.env.CIRCUIT_BREAKER_COOLDOWN_MS || 10 * 60_000); // 10 min once tripped
+const markHistory = new Map(); // key -> [{t, mark}] within CB_WINDOW_MS
+const tripped = new Map(); // key -> trippedAt
+
+function recordMarkHistory(key, mark, now) {
+  const arr = markHistory.get(key) || [];
+  arr.push({ t: now, mark });
+  while (arr.length && now - arr[0].t > CB_WINDOW_MS) arr.shift();
+  markHistory.set(key, arr);
+  return arr;
+}
+
+function checkCircuitBreaker(key, mark, now) {
+  const arr = recordMarkHistory(key, mark, now);
+  if (arr.length < 2) return;
+  const oldest = arr[0].mark;
+  if (oldest <= 0) return;
+  const move = Math.abs(mark - oldest) / oldest;
+  if (move > CB_MAX_MOVE) {
+    if (!tripped.has(key)) console.warn(`[circuit-breaker] ${key} tripped: ${(move * 100).toFixed(1)}% move in ${(CB_WINDOW_MS / 60000).toFixed(0)}min (mark $${oldest} -> $${mark}) — new positions blocked for ${(CB_COOLDOWN_MS / 60000).toFixed(0)}min`);
+    tripped.set(key, now);
+  }
+}
+
+// True while a market is in cooldown after an abnormally fast price move.
+// Existing positions can still be closed/liquidated against the real mark —
+// this only blocks NEW exposure being opened into a possibly-manipulated spike.
+export function circuitBreakerTripped(key) {
+  const at = tripped.get(key);
+  if (!at) return false;
+  if (Date.now() - at > CB_COOLDOWN_MS) { tripped.delete(key); return false; }
+  return true;
+}
+export function circuitBreakerInfo(key) {
+  const at = tripped.get(key);
+  if (!at) return { tripped: false };
+  const remainingMs = Math.max(0, CB_COOLDOWN_MS - (Date.now() - at));
+  return { tripped: remainingMs > 0, remainingMs };
 }
 
 // For mock mode: push a synthetic spot straight through the TWAP so the same
@@ -166,5 +219,6 @@ export function pushMockSpot(key, spot) {
   st.mark = Math.round(st.mark * 100) / 100;
   st.sources = 1;
   st.updatedAt = now;
+  checkCircuitBreaker(key, st.mark, now);
   return st.mark;
 }

@@ -4,7 +4,7 @@ import cors from "cors";
 import { MARKETS } from "./markets.js";
 import { mockTick } from "./lisskins.js";
 import { seedCandles, pushTick, getCandles, getLastCandle, CANDLE_TF_SEC } from "./candles.js";
-import { refreshOracle, pushMockSpot, markOf as oracleMark, markAgeOf as oracleMarkAge, isStale as oracleStale, seedMark, oracleSnapshot, oracleSources } from "./oracle.js";
+import { refreshOracle, pushMockSpot, markOf as oracleMark, markAgeOf as oracleMarkAge, isStale as oracleStale, seedMark, oracleSnapshot, oracleSources, circuitBreakerInfo } from "./oracle.js";
 import { csfloatDiag } from "./csfloat.js";
 import { fetchDailyHistory, historyEnabled } from "./history.js";
 import { fetchSteamHistory, getSteamHistoryCached, getSteamIconCached, steamChartEnabled, warmSteamHistory, logSteamAuthStatus } from "./steamchart.js";
@@ -254,6 +254,7 @@ app.get("/api/markets", (_req, res) => {
     return {
       key: m.key, name: m.name, image: m.image, price: s.price,
       wear: s.wear, icon: safeIcon(m.hash), change24h: change, funding: s.funding, updatedAt: s.updatedAt,
+      circuitBreaker: circuitBreakerInfo(m.key),
     };
   });
   res.json({ mock: IS_MOCK, source: SOURCE, tf: CANDLE_TF_SEC, nextFunding: nextFundingTs(), markets: list });
