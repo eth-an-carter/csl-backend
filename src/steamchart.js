@@ -17,6 +17,53 @@ const SPACING_MS = 6000; // pause between fetches to stay under rate limits
 const cache = new Map(); // hash -> { at, candles }
 let chain = Promise.resolve(); // serialize all Steam fetches
 
+// ---------------------------------------------------------------------------
+// Currency guard. We ask Steam for currency=1 (USD), but an AUTHENTICATED
+// session can silently ignore that and return prices in the COOKIE ACCOUNT'S
+// OWN Steam Wallet currency instead (e.g. KZT/Tenge). Rather than require
+// changing that account's wallet currency (needs a Steam Support ticket or a
+// purchase), we detect the actual currency from Steam's own price_prefix /
+// price_suffix and convert every price to USD ourselves, using a live FX
+// rate. Cached for a day — these don't need to be exact to the minute.
+const FX_TTL = 24 * 60 * 60 * 1000;
+const fxCache = new Map(); // currency code -> { at, rate } (units of that currency per 1 USD)
+
+// Steam's price_suffix/price_prefix -> ISO currency code, for the currencies
+// we've actually seen. Extend this if another account/currency shows up.
+const CURRENCY_SYMBOLS = {
+  "₸": "KZT", "KZT": "KZT", "тг.": "KZT", "тг": "KZT",
+  "₴": "UAH", "₽": "RUB", "R$": "BRL", "₺": "TRY",
+  "Rp": "IDR", "₫": "VND", "₹": "INR", "₩": "KRW",
+};
+
+function detectCurrency(prefix, suffix) {
+  if (prefix === "$" && !suffix) return "USD";
+  const combined = `${prefix}${suffix}`.trim();
+  for (const [sym, code] of Object.entries(CURRENCY_SYMBOLS)) {
+    if (combined.includes(sym)) return code;
+  }
+  return null; // unrecognized — safest to refuse rather than guess
+}
+
+async function fxRateToUsd(code) {
+  if (code === "USD") return 1;
+  const hit = fxCache.get(code);
+  if (hit && Date.now() - hit.at < FX_TTL) return hit.rate;
+  try {
+    const res = await fetch(`https://open.er-api.com/v6/latest/${code}`);
+    const data = await res.json();
+    const perUsd = data?.rates?.USD; // "1 <code> = perUsd USD"
+    if (Number.isFinite(perUsd) && perUsd > 0) {
+      fxCache.set(code, { at: Date.now(), rate: perUsd });
+      console.log(`[steamchart] FX: 1 ${code} = $${perUsd} (live rate cached 24h)`);
+      return perUsd;
+    }
+  } catch (e) {
+    console.warn(`[steamchart] FX fetch failed for ${code}:`, e.message);
+  }
+  return hit ? hit.rate : null; // stale-but-better-than-nothing, else give up
+}
+
 export function steamChartEnabled() {
   return ENABLED;
 }
@@ -98,29 +145,39 @@ async function doFetch(hash) {
 
     // We asked for currency=1 (USD), but an AUTHENTICATED session can make
     // Steam silently ignore that and return the logged-in account's OWN
-    // wallet currency instead — e.g. a currency that hyperinflated/devalued
-    // over the item's history, so the same real value prints as wildly
-    // different "numbers" across years (this is what was corrupting every
-    // chart: $85 one year, $900,000+ another, for the SAME skin). Steam tells
-    // us which currency it actually used via price_prefix/price_suffix — if
-    // that isn't a plain "$", the whole series is untrustworthy and we must
-    // not parse it as dollars.
+    // wallet currency instead (this account's wallet is KZT/Tenge). Rather
+    // than require changing the account's currency, detect what Steam
+    // actually used via price_prefix/price_suffix and convert every price to
+    // USD with a live FX rate.
     const prefix = String(data.price_prefix || "").trim();
     const suffix = String(data.price_suffix || "").trim();
-    if (prefix !== "$" || suffix !== "") {
-      console.warn(`[steamchart] WRONG CURRENCY for ${hash}: Steam returned prefix="${prefix}" suffix="${suffix}" instead of "$" — the STEAM_LOGIN_SECURE account's Steam Wallet currency is not USD. Fix: on that Steam account, go to Store > Account Details > Change Currency > USD, get a fresh steamLoginSecure cookie, and update the Railway variable. Ignoring this response rather than parsing garbage as dollars.`);
+    const currency = detectCurrency(prefix, suffix);
+    let fx = 1;
+    if (currency === null) {
+      console.warn(`[steamchart] UNRECOGNIZED CURRENCY for ${hash}: prefix="${prefix}" suffix="${suffix}" — add it to CURRENCY_SYMBOLS in steamchart.js. Discarding rather than guessing.`);
       if (icon) cache.set(hash, { at: Date.now(), candles: cache.get(hash)?.candles || [], icon });
       return cache.get(hash)?.candles || null;
     }
+    if (currency !== "USD") {
+      const rate = await fxRateToUsd(currency); // "1 <currency> = rate USD"
+      if (!rate) {
+        console.warn(`[steamchart] no FX rate available for ${currency} (${hash}) — discarding rather than guessing.`);
+        if (icon) cache.set(hash, { at: Date.now(), candles: cache.get(hash)?.candles || [], icon });
+        return cache.get(hash)?.candles || null;
+      }
+      fx = rate;
+      console.log(`[steamchart] ${hash}: converting ${currency} → USD at 1 ${currency} = $${rate}`);
+    }
 
-    // entries: ["Aug 14 2013 01: +0", "4.203", "1"] -> daily OHLC
+    // entries: ["Aug 14 2013 01: +0", "4.203", "1"] -> daily OHLC (in USD, after fx)
     const byDay = new Map();
     for (const row of raw) {
       if (!Array.isArray(row) || row.length < 2) continue;
       const dateStr = String(row[0]).slice(0, 11); // "Aug 14 2013"
       const t = Math.floor(Date.parse(dateStr + " UTC") / 1000);
-      const price = Number(row[1]);
-      if (!Number.isFinite(t) || !Number.isFinite(price) || price <= 0) continue;
+      const priceRaw = Number(row[1]);
+      if (!Number.isFinite(t) || !Number.isFinite(priceRaw) || priceRaw <= 0) continue;
+      const price = priceRaw * fx;
       const day = Math.floor(t / 86400) * 86400;
       const c = byDay.get(day);
       if (!c) byDay.set(day, { time: day, open: price, high: price, low: price, close: price });
