@@ -421,8 +421,25 @@ app.get("/api/history/:key", async (req, res) => {
   if (!m) return res.status(404).json({ error: "not_found" });
   const mk = markOf(m.key);
   const own = ownDaily.get(m.key) || [];
-  // 1) Steam Market full history — served ONLY if the skin still trades on Steam
-  //    near its true price (see steamHistoryIsGenuine)
+  // 1) steamwebapi.com — a proper paid/free-tier API, not tied to any personal
+  //    Steam login. Preferred when configured: it can't expire like a cookie
+  //    session can, and it isn't affected by the cookie account's own Steam
+  //    Wallet currency. Set STEAMWEBAPI_KEY on Railway to enable.
+  if (historyEnabled()) {
+    const candles = await fetchDailyHistory(m.hash);
+    if (candles && candles.length) {
+      if (steamHistoryIsGenuine(candles, mk))
+        return res.json({ key: m.key, real: true, source: "steamwebapi", basis: "csl-mark", tf: 86400, candles: rebaseToMark(candles, mk) });
+      const { result: spliced } = spliceHistory(candles, own);
+      if (spliced)
+        return res.json({ key: m.key, real: true, source: "spliced", reason: "outgrew_steam", tf: 86400, ...spliced });
+      return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
+    }
+  }
+  // 2) Steam Market full history via the cookie-authenticated scrape — backup
+  //    when steamwebapi isn't configured, or came back empty. Served ONLY if
+  //    the skin still trades on Steam near its true price (see
+  //    steamHistoryIsGenuine).
   if (steamChartEnabled()) {
     const cached = getSteamHistoryCached(m.hash);
     if (cached && cached.length) {
@@ -449,18 +466,6 @@ app.get("/api/history/:key", async (req, res) => {
       return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
     }
     fetchSteamHistory(m.hash); // warm in background; don't block the request
-  }
-  // 2) steamwebapi (if key set) — same trust gate
-  if (historyEnabled()) {
-    const candles = await fetchDailyHistory(m.hash);
-    if (candles && candles.length) {
-      if (steamHistoryIsGenuine(candles, mk))
-        return res.json({ key: m.key, real: true, source: "steamwebapi", basis: "csl-mark", tf: 86400, candles: rebaseToMark(candles, mk) });
-      const { result: spliced } = spliceHistory(candles, own);
-      if (spliced)
-        return res.json({ key: m.key, real: true, source: "spliced", reason: "outgrew_steam", tf: 86400, ...spliced });
-      return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
-    }
   }
   // 3) no Steam data at all (cold cache / disabled) — still serve whatever
   //    real history CSL itself has collected, honestly labelled
