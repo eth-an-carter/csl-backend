@@ -363,12 +363,23 @@ const STEAM_CAP_SAFETY = 0.95; // stay a bit under the hard cap, fees etc.
 function realPreCapSegment(candles) {
   if (!Array.isArray(candles) || !candles.length) return [];
   const cap = STEAM_LISTING_CAP * STEAM_CAP_SAFETY;
-  const out = [];
-  for (const c of candles) {
-    if (c.close > 0 && c.close <= cap) out.push(c);
-    else break; // stop at the first candle that crosses the cap — rest is not genuine
+  // A brand-new ultra-rare drop (Dragon Lore, Howl...) often has chaotic price
+  // discovery in its first days/weeks — one random overpriced listing can spike
+  // a single day's close way above the cap before the market settles. Cutting
+  // the segment on that FIRST breach threw away years of otherwise-genuine
+  // history over a single noisy day. Instead we only cut at a SUSTAINED
+  // breach: the first day after which it stays above cap for a full run of
+  // SUSTAIN_DAYS in a row (i.e. it has actually, permanently outgrown Steam).
+  const SUSTAIN_DAYS = 20;
+  let cutoff = candles.length;
+  for (let i = 0; i < candles.length; i++) {
+    if (!(candles[i].close > cap)) continue;
+    const end = Math.min(candles.length, i + SUSTAIN_DAYS);
+    let sustained = end - i >= SUSTAIN_DAYS; // need the full run available to count as "sustained"
+    for (let j = i; sustained && j < end; j++) if (!(candles[j].close > cap)) sustained = false;
+    if (sustained) { cutoff = i; break; }
   }
-  return out;
+  return candles.slice(0, cutoff);
 }
 
 // Splice: [real Steam candles from before the skin crossed the cap] + [gap] +
@@ -401,7 +412,10 @@ app.get("/api/history/:key", async (req, res) => {
       // outgrew Steam (DLore, Howl, knives): splice genuine pre-cap Steam
       // history onto our own real daily closes instead of discarding it all
       const spliced = spliceHistory(cached, own);
-      console.log(`[history] ${m.key}: outgrew Steam — pre-cap Steam segment=${spliced ? spliced.candles.length - own.length : 0} candles, own=${own.length} candles` + (spliced && spliced.candles.length - own.length === 0 ? " (EMPTY pre-cap segment — check STEAM_LOGIN_SECURE / the steamchart date-range log for this hash)" : ""));
+      const preLen = spliced ? spliced.candles.length - own.length : 0;
+      const preStart = preLen > 0 ? new Date(spliced.candles[0].time * 1000).toISOString().slice(0, 10) : null;
+      const preEnd = preLen > 0 ? new Date(spliced.candles[preLen - 1].time * 1000).toISOString().slice(0, 10) : null;
+      console.log(`[history] ${m.key}: outgrew Steam — pre-cap Steam segment=${preLen} candles${preLen ? ` (${preStart} → ${preEnd})` : ""}, own=${own.length} candles` + (preLen === 0 ? " (EMPTY pre-cap segment — check STEAM_LOGIN_SECURE / the steamchart date-range log for this hash)" : ""));
       if (spliced)
         return res.json({ key: m.key, real: true, source: "spliced", reason: "outgrew_steam", tf: 86400, ...spliced });
       return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
