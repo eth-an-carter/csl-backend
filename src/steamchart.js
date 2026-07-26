@@ -112,7 +112,9 @@ async function doFetch(hash) {
     const candles = [...byDay.values()].sort((a, b) => a.time - b.time);
     if (!candles.length) return null;
     cache.set(hash, { at: Date.now(), candles, icon });
-    console.log(`[steamchart] ${hash}: ${candles.length} daily candles (${new Date(candles[0].time * 1000).toISOString().slice(0, 10)} \u2192 now)${icon ? " + icon" : ""}`);
+    const lastDate = new Date(candles[candles.length - 1].time * 1000);
+    const staleDays = Math.round((Date.now() - lastDate.getTime()) / 86400000);
+    console.log(`[steamchart] ${hash}: ${candles.length} daily candles (${new Date(candles[0].time * 1000).toISOString().slice(0, 10)} \u2192 ${lastDate.toISOString().slice(0, 10)}, last candle is ${staleDays}d old)${icon ? " + icon" : ""}`);
     return candles;
   } catch (e) {
     console.warn("[steamchart] error:", e.message);
