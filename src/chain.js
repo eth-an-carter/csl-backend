@@ -56,17 +56,22 @@ export async function usdgBalanceOf(address) {
 
 // Incoming USDG transfers to `address`, idempotent by tx hash+logIndex. Scans
 // Transfer logs where `to` == address, newest first. `fromBlock` bounds the scan.
+// Only returns transfers at least CONFIRMATIONS blocks behind the chain tip —
+// a reorg at the very tip (rare but possible before an L2 batch posts to L1)
+// must not be able to un-happen a deposit we've already credited to a balance.
+const CONFIRMATIONS = Number(process.env.DEPOSIT_CONFIRMATIONS || 12);
 export async function incomingUsdgTransfers(address, { fromBlock } = {}) {
   if (!publicClient || !USDG_ADDRESS) return [];
   try {
     const latest = await publicClient.getBlockNumber();
+    const safeTip = latest > BigInt(CONFIRMATIONS) ? latest - BigInt(CONFIRMATIONS) : 0n;
     const start = fromBlock != null ? BigInt(fromBlock) : (latest > 50000n ? latest - 50000n : 0n);
     const logs = await publicClient.getLogs({
       address: getAddress(USDG_ADDRESS),
       event: ERC20_TRANSFER,
       args: { to: getAddress(address) },
       fromBlock: start,
-      toBlock: latest,
+      toBlock: safeTip, // <- confirmation buffer, not the raw chain tip
     });
     return logs.map((l) => ({
       sig: `${l.transactionHash}:${l.logIndex}`,
