@@ -125,16 +125,31 @@ async function doFetch(hash) {
     }
   } catch { /* ignore icon failures */ }
 
-  // 2) full price history — the dedicated JSON endpoint. Requires a logged-in
-  //    cookie; returns EVERY sale since the item first listed.
-  try {
+  // 2) full price history — the dedicated JSON endpoint. A logged-in cookie
+  //    gets EVERY sale since the item first listed; without one (or if the
+  //    cookie is rejected) Steam still serves the last ~3 months anonymously.
+  //    If the cookie fails, retry once without it — a short REAL window beats
+  //    no window at all.
+  async function tryFetch(withCookie) {
+    const h = { ...headers };
+    if (!withCookie) delete h.Cookie;
     const url = `https://steamcommunity.com/market/pricehistory/?appid=730&currency=1&market_hash_name=${encodeURIComponent(hash)}`;
-    const res = await fetch(url, { headers });
+    const res = await fetch(url, { headers: h });
+    return { res, withCookie };
+  }
+
+  try {
+    let { res, withCookie } = await tryFetch(Boolean(cookie));
+    if (!res.ok && cookie) {
+      console.warn(`[steamchart] pricehistory ${res.status} for ${hash} with cookie${res.status === 400 || res.status === 401 ? " (cookie missing/expired?)" : ""} — retrying anonymously (short window)`);
+      ({ res, withCookie } = await tryFetch(false));
+    }
     if (!res.ok) {
-      console.warn(`[steamchart] pricehistory ${res.status} for ${hash}${res.status === 400 || res.status === 401 ? " (cookie missing/expired?)" : ""}`);
+      console.warn(`[steamchart] pricehistory ${res.status} for ${hash} (anonymous too)`);
       if (icon) cache.set(hash, { at: Date.now(), candles: cache.get(hash)?.candles || [], icon });
       return cache.get(hash)?.candles || null;
     }
+    if (!withCookie) console.log(`[steamchart] ${hash}: using anonymous ~3-month window (cookie unavailable/rejected)`);
     const data = await res.json();
     const raw = data && data.prices;
     if (!Array.isArray(raw) || !raw.length) {
@@ -148,7 +163,8 @@ async function doFetch(hash) {
     // wallet currency instead (this account's wallet is KZT/Tenge). Rather
     // than require changing the account's currency, detect what Steam
     // actually used via price_prefix/price_suffix and convert every price to
-    // USD with a live FX rate.
+    // USD with a live FX rate. (The anonymous fallback is always USD, so this
+    // only ever triggers on the cookie path.)
     const prefix = String(data.price_prefix || "").trim();
     const suffix = String(data.price_suffix || "").trim();
     const currency = detectCurrency(prefix, suffix);
