@@ -361,25 +361,44 @@ const STEAM_LISTING_CAP = Number(process.env.STEAM_LISTING_CAP || 1800);
 const STEAM_CAP_SAFETY = 0.95; // stay a bit under the hard cap, fees etc.
 
 function realPreCapSegment(candles) {
-  if (!Array.isArray(candles) || !candles.length) return [];
+  if (!Array.isArray(candles) || !candles.length) return { pre: [], stats: null };
   const cap = STEAM_LISTING_CAP * STEAM_CAP_SAFETY;
-  // A brand-new ultra-rare drop (Dragon Lore, Howl...) often has chaotic price
-  // discovery in its first days/weeks — one random overpriced listing can spike
-  // a single day's close way above the cap before the market settles. Cutting
-  // the segment on that FIRST breach threw away years of otherwise-genuine
-  // history over a single noisy day. Instead we only cut at a SUSTAINED
-  // breach: the first day after which it stays above cap for a full run of
-  // SUSTAIN_DAYS in a row (i.e. it has actually, permanently outgrown Steam).
-  const SUSTAIN_DAYS = 20;
-  let cutoff = candles.length;
+
+  // Raw stats for diagnostics — lets us see in the logs exactly what the
+  // series looks like instead of guessing blind.
+  const closes = candles.map((c) => c.close);
+  const stats = {
+    cap,
+    first: candles[0].close,
+    last: candles[candles.length - 1].close,
+    min: Math.min(...closes),
+    max: Math.max(...closes),
+    underCapCount: closes.filter((c) => c <= cap).length,
+    total: candles.length,
+  };
+
+  // A forward scan that cuts at the first "sustained" breach is fragile: a
+  // hyped, brand-new ultra-rare drop (Dragon Lore, Howl...) can have a
+  // speculative bubble that itself lasts weeks — long enough to look
+  // "sustained" — before crashing back down to a genuine, much lower, settled
+  // price for years. Cutting there would throw away most of the real history.
+  //
+  // Instead: smooth the series with a rolling median (kills single-day noise
+  // in EITHER direction — an early bubble or a late fluke dip) and find the
+  // LAST point where the smoothed price was still at/under the cap. Everything
+  // up to there is genuine settled history; everything after is where it
+  // permanently outgrew Steam.
+  const WINDOW = 15;
+  const half = Math.floor(WINDOW / 2);
+  let lastUnderIdx = -1;
   for (let i = 0; i < candles.length; i++) {
-    if (!(candles[i].close > cap)) continue;
-    const end = Math.min(candles.length, i + SUSTAIN_DAYS);
-    let sustained = end - i >= SUSTAIN_DAYS; // need the full run available to count as "sustained"
-    for (let j = i; sustained && j < end; j++) if (!(candles[j].close > cap)) sustained = false;
-    if (sustained) { cutoff = i; break; }
+    const lo = Math.max(0, i - half), hi = Math.min(candles.length, i + half + 1);
+    const window = closes.slice(lo, hi).slice().sort((a, b) => a - b);
+    const med = window[Math.floor(window.length / 2)];
+    if (med <= cap) lastUnderIdx = i;
   }
-  return candles.slice(0, cutoff);
+  const pre = lastUnderIdx === -1 ? [] : candles.slice(0, lastUnderIdx + 1);
+  return { pre, stats };
 }
 
 // Splice: [real Steam candles from before the skin crossed the cap] + [gap] +
@@ -389,12 +408,12 @@ function realPreCapSegment(candles) {
 // reported explicitly so the frontend can draw it honestly instead of
 // pretending the line is continuous.
 function spliceHistory(steamCandles, ownCandles) {
-  const pre = realPreCapSegment(steamCandles);
+  const { pre, stats } = realPreCapSegment(steamCandles);
   const own = Array.isArray(ownCandles) ? ownCandles : [];
-  if (!pre.length && !own.length) return null;
+  if (!pre.length && !own.length) return { result: null, stats };
   const candles = [...pre, ...own].sort((a, b) => a.time - b.time);
   const gap = pre.length && own.length ? { from: pre[pre.length - 1].time, to: own[0].time } : null;
-  return { candles, gap };
+  return { result: { candles, gap }, stats };
 }
 
 app.get("/api/history/:key", async (req, res) => {
@@ -411,11 +430,13 @@ app.get("/api/history/:key", async (req, res) => {
         return res.json({ key: m.key, real: true, source: "steam", basis: "csl-mark", tf: 86400, candles: rebaseToMark(cached, mk) });
       // outgrew Steam (DLore, Howl, knives): splice genuine pre-cap Steam
       // history onto our own real daily closes instead of discarding it all
-      const spliced = spliceHistory(cached, own);
+      const { result: spliced, stats } = spliceHistory(cached, own);
       const preLen = spliced ? spliced.candles.length - own.length : 0;
       const preStart = preLen > 0 ? new Date(spliced.candles[0].time * 1000).toISOString().slice(0, 10) : null;
       const preEnd = preLen > 0 ? new Date(spliced.candles[preLen - 1].time * 1000).toISOString().slice(0, 10) : null;
-      console.log(`[history] ${m.key}: outgrew Steam — pre-cap Steam segment=${preLen} candles${preLen ? ` (${preStart} → ${preEnd})` : ""}, own=${own.length} candles` + (preLen === 0 ? " (EMPTY pre-cap segment — check STEAM_LOGIN_SECURE / the steamchart date-range log for this hash)" : ""));
+      console.log(`[history] ${m.key}: outgrew Steam — pre-cap Steam segment=${preLen} candles${preLen ? ` (${preStart} → ${preEnd})` : ""}, own=${own.length} candles`
+        + ` | raw stats: cap=$${stats.cap.toFixed(0)} first=$${stats.first.toFixed(0)} last=$${stats.last.toFixed(0)} min=$${stats.min.toFixed(0)} max=$${stats.max.toFixed(0)} underCap=${stats.underCapCount}/${stats.total}`
+        + (preLen === 0 ? " (EMPTY pre-cap segment)" : ""));
       if (spliced)
         return res.json({ key: m.key, real: true, source: "spliced", reason: "outgrew_steam", tf: 86400, ...spliced });
       return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
@@ -428,7 +449,7 @@ app.get("/api/history/:key", async (req, res) => {
     if (candles && candles.length) {
       if (steamHistoryIsGenuine(candles, mk))
         return res.json({ key: m.key, real: true, source: "steamwebapi", basis: "csl-mark", tf: 86400, candles: rebaseToMark(candles, mk) });
-      const spliced = spliceHistory(candles, own);
+      const { result: spliced } = spliceHistory(candles, own);
       if (spliced)
         return res.json({ key: m.key, real: true, source: "spliced", reason: "outgrew_steam", tf: 86400, ...spliced });
       return res.json({ key: m.key, real: false, reason: "outgrew_steam", tf: 86400, candles: [] });
