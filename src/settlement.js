@@ -4,7 +4,7 @@
 //   withdrawals — requests always recorded; auto-payout when TREASURY_SECRET is set
 //   vault       — accepts deposits only when VAULT_OPEN=1
 import { pool, ensureUser } from "./db.js";
-import { publicClient, depositsEnabled, depositAddress, incomingUsdgTransfers, usdgBalanceOf, sweepDepositToTreasury, payWithdrawal, treasuryAddress, isValidAddress } from "./chain.js";
+import { publicClient, depositsEnabled, depositAddress, incomingUsdgTransfers, usdgBalanceOf, sweepDepositToTreasury, payWithdrawal, treasuryAddress, isValidAddress, hotWalletConfigured, hotWalletBalance } from "./chain.js";
 import { randomUUID } from "crypto";
 
 const MIN_WITHDRAW = Number(process.env.MIN_WITHDRAW || 5);
@@ -55,7 +55,7 @@ export async function getDepositInfo(privyId) {
   return { enabled: true, address: depositAddress(privyId), maxPerUser: MAX_DEPOSIT_PER_USER };
 }
 
-// Credit incoming USDG per on-chain transfer. Idempotent: each signature is
+// Credit incoming USDC per on-chain signature. Idempotent: each signature is
 // credited at most once (unique index on deposits.sig). Safe across restarts,
 // DB retries, and double-scans. Respects the per-user deposit cap.
 export async function scanDeposits() {
@@ -159,16 +159,21 @@ export async function requestWithdrawal(privyId, amount, address) {
     );
     await client.query("COMMIT");
 
-    // auto-payout small withdrawals when the treasury key is configured AND
-    // the house-wide hourly auto-payout budget still has room (drain protection)
-    const treasury = treasuryAddress();
+    // auto-payout small withdrawals from the HOT wallet — never the cold
+    // treasury — when the house-wide hourly auto-payout budget still has
+    // room (drain protection) AND the hot wallet actually has the funds.
     const hourAgo = Date.now() - 3_600_000;
     const houseHour = Number((await pool.query(
       `SELECT coalesce(sum(amount),0) s FROM withdrawals WHERE status='sent' AND created_at > $1`, [hourAgo]
     )).rows[0].s);
     const houseRoom = MAX_WITHDRAW_HOUSE_HOUR - houseHour;
 
-    if (treasuryAddress() && process.env.TREASURY_PRIVKEY && publicClient && amount <= MAX_AUTO_WITHDRAW && amount <= houseRoom) {
+    if (hotWalletConfigured() && publicClient && amount <= MAX_AUTO_WITHDRAW && amount <= houseRoom) {
+      const hotBal = await hotWalletBalance();
+      if (hotBal < amount) {
+        console.warn(`[withdraw] hot wallet low: $${hotBal.toFixed(2)} available, needed $${amount} — leaving pending, top up the hot wallet from cold storage`);
+        return { ok: true, status: "pending" };
+      }
       // mark 'processing' FIRST so a crash mid-send never lets a retry pay twice.
       const claim = await pool.query(
         `UPDATE withdrawals SET status='processing' WHERE id=$1 AND status='pending' RETURNING id`, [id]
@@ -249,7 +254,7 @@ export async function vaultDeposit(privyId, amount) {
 }
 
 // ---- admin: sweep deposit addresses → treasury ------------------------------
-// Lists every user's deposit address with its current USDG balance, so an
+// Lists every user's deposit address with its current USDC + SOL balance, so an
 // admin can see what's sitting uncollected across deposit addresses.
 export async function depositAddressesWithBalances() {
   if (!depositsEnabled()) return { enabled: false, addresses: [] };
@@ -270,7 +275,7 @@ export async function depositAddressesWithBalances() {
   return { enabled: true, treasury: treasuryAddress(), totalUsdg: Math.round(totalUsdg * 100) / 100, count: out.length, addresses: out };
 }
 
-// Sweeps every user's deposit address that has enough USDG
+// Sweeps every user's deposit address that has enough USDC (and SOL for the fee)
 // into the treasury. Returns a per-address result list. Safe to re-run: already
 // empty addresses are skipped, and each sweep waits for on-chain confirmation.
 export async function sweepAllDeposits() {

@@ -4,8 +4,20 @@
 //   RPC_URL              — Robinhood Chain RPC
 //   DEPOSIT_MASTER_SEED  — long random string; deposit keys derive from it
 //   USDG_ADDRESS         — USDG ERC-20 contract address
-//   TREASURY_ADDRESS     — receives sweeps, pays withdrawals
-//   TREASURY_PRIVKEY     — 0x… private key; only needed for auto-withdrawals
+//
+// Treasury is split COLD / HOT on purpose — the server never holds a key
+// that can move the bulk of user funds:
+//   TREASURY_ADDRESS     — COLD. Where every deposit sweep lands. Should be a
+//                          multisig (e.g. Gnosis Safe) or hardware-wallet
+//                          address. The server never needs its private key —
+//                          it only ever sends TO this address, never from it.
+//   HOT_WALLET_PRIVKEY   — HOT. A separate, small operational wallet used
+//                          ONLY to pay out auto-approved withdrawals
+//                          (see MAX_AUTO_WITHDRAW / MAX_WITHDRAW_HOUSE_HOUR
+//                          in settlement.js). Fund it manually, periodically,
+//                          from the cold wallet — a compromised server key
+//                          then caps the blast radius at whatever's sitting
+//                          in this one wallet, not the whole treasury.
 import { createPublicClient, createWalletClient, http, getAddress, parseAbiItem, formatUnits, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { keccak256, toHex } from "viem";
@@ -99,15 +111,29 @@ export async function sweepDepositToTreasury(accountId) {
   return { hash, amount: bal };
 }
 
-// Pay a withdrawal from the treasury.
+// Pay a withdrawal from the HOT wallet (small operational balance, NOT the
+// cold treasury). This is what a compromised server key can drain, at most.
 export async function payWithdrawal(toAddress, amount) {
-  if (!publicClient || !process.env.TREASURY_PRIVKEY) throw new Error("treasury_not_configured");
-  const treasury = privateKeyToAccount(process.env.TREASURY_PRIVKEY);
-  const wallet = createWalletClient({ account: treasury, chain, transport: http(RPC_URL) });
+  if (!publicClient || !process.env.HOT_WALLET_PRIVKEY) throw new Error("hot_wallet_not_configured");
+  const hot = privateKeyToAccount(process.env.HOT_WALLET_PRIVKEY);
+  const wallet = createWalletClient({ account: hot, chain, transport: http(RPC_URL) });
   return wallet.writeContract({
     address: getAddress(USDG_ADDRESS), abi: ERC20_ABI, functionName: "transfer",
     args: [getAddress(toAddress), parseUnits(String(amount), USDG_DECIMALS)],
   });
+}
+
+export function hotWalletConfigured() { return Boolean(process.env.HOT_WALLET_PRIVKEY); }
+export function hotWalletAddress() {
+  return process.env.HOT_WALLET_PRIVKEY ? privateKeyToAccount(process.env.HOT_WALLET_PRIVKEY).address : null;
+}
+// Current USDG balance actually sitting in the hot wallet — checked before
+// every auto-payout attempt so we never try to send more than it holds, and
+// so we can warn Chase to top it up from cold storage before it runs dry.
+export async function hotWalletBalance() {
+  const addr = hotWalletAddress();
+  if (!addr) return 0;
+  return usdgBalanceOf(addr);
 }
 
 export function isValidAddress(a) { return typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a); }

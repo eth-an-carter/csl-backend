@@ -13,7 +13,7 @@ import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, p
 import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
-import { depositsEnabled } from "./chain.js";
+import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance } from "./chain.js";
 
 const PORT = process.env.PORT || 8080;
 const MOCK = process.env.MOCK !== "0"; // legacy flag
@@ -551,6 +551,16 @@ app.get("/api/admin/deposits/balances", requireAdmin, async (_req, res) => {
 });
 app.post("/api/admin/deposits/sweep", requireAdmin, async (_req, res) => {
   res.json(await sweepAllDeposits());
+});
+// Hot wallet monitor — the operational wallet that actually pays out
+// auto-approved withdrawals. Cold treasury balance isn't exposed here on
+// purpose: check that directly in your wallet/multisig, not through the app.
+app.get("/api/admin/hot-wallet", requireAdmin, async (_req, res) => {
+  res.json({
+    configured: hotWalletConfigured(),
+    address: hotWalletAddress(),
+    balance: hotWalletConfigured() ? await hotWalletBalance() : 0,
+  });
 });
 
 // --- oracle transparency: spot vs mark vs sources per market ---
