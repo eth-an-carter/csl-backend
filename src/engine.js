@@ -44,6 +44,10 @@ export function positionPnl(pos, mark, rate, now = Date.now()) {
   return Math.max(-pos.collateral, pricePnl - fundingPnl(pos, rate, now));
 }
 
+// Slice of every taker fee set aside in the insurance fund, first in line to
+// absorb bad debt before it ever touches the vault.
+export const INSURANCE_FUND_SHARE = Number(process.env.INSURANCE_FUND_SHARE || 0.20);
+
 export async function openPosition(privyId, market, mark, { side, collateral, leverage }, markAgeMs = 0) {
   collateral = Number(collateral); leverage = Math.floor(Number(leverage));
   if (!["long", "short"].includes(side)) return { error: "bad_side" };
@@ -87,6 +91,11 @@ export async function openPosition(privyId, market, mark, { side, collateral, le
       `INSERT INTO positions (id,privy_id,key,name,image,side,entry,collateral,leverage,notional,units,liq,opened_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [pos.id, privyId, pos.key, pos.name, pos.image, pos.side, pos.entry, pos.collateral, pos.leverage, pos.notional, pos.units, pos.liq, pos.opened_at]
+    );
+    const insuranceCut = fee * INSURANCE_FUND_SHARE;
+    await client.query(
+      `INSERT INTO insurance_fund_ledger (id, type, amount_usd, market_key, created_at) VALUES ($1,'contribution',$2,$3,$4)`,
+      [randomUUID(), Number(insuranceCut.toFixed(6)), market.key, Date.now()]
     );
     await client.query("COMMIT");
     return { ok: true, position: pos, fee };
@@ -150,13 +159,33 @@ export async function liquidationSweep(markOf, fundingOf, markAgeOf = () => 0) {
           );
         } catch (e) { /* ledger is best-effort — never block a liquidation */ }
         if (badDebt > 0) {
-          try {
-            await pool.query(
-              `INSERT INTO bad_debt_ledger (id, position_id, market_key, amount_usd, created_at)
-               VALUES ($1, $2, $3, $4, $5)`,
-              [randomUUID(), pos.id, pos.key, Number(badDebt.toFixed(6)), Date.now()]
-            );
-          } catch (e) { /* ledger is best-effort — never block a liquidation */ }
+          // insurance fund absorbs bad debt first — only the remainder (if
+          // the fund itself is dry) actually reaches the vault
+          const fundRow = (await pool.query(
+            `SELECT coalesce(sum(case when type='contribution' then amount_usd else -amount_usd end),0) bal FROM insurance_fund_ledger`
+          )).rows[0];
+          const fundBalance = Number(fundRow.bal);
+          const covered = Math.min(fundBalance, badDebt);
+          const uncovered = badDebt - covered;
+          if (covered > 0) {
+            try {
+              await pool.query(
+                `INSERT INTO insurance_fund_ledger (id, type, amount_usd, position_id, market_key, created_at)
+                 VALUES ($1,'payout',$2,$3,$4,$5)`,
+                [randomUUID(), Number(covered.toFixed(6)), pos.id, pos.key, Date.now()]
+              );
+            } catch (e) { /* ledger is best-effort — never block a liquidation */ }
+          }
+          if (uncovered > 0) {
+            try {
+              await pool.query(
+                `INSERT INTO bad_debt_ledger (id, position_id, market_key, amount_usd, created_at)
+                 VALUES ($1, $2, $3, $4, $5)`,
+                [randomUUID(), pos.id, pos.key, Number(uncovered.toFixed(6)), Date.now()]
+              );
+            } catch (e) { /* ledger is best-effort — never block a liquidation */ }
+          }
+          console.log(`[engine] bad debt $${badDebt.toFixed(2)} on ${pos.id} — insurance fund covered $${covered.toFixed(2)}${uncovered > 0 ? `, UNCOVERED (hit vault) $${uncovered.toFixed(2)}` : ""}`);
         }
         console.log(`[engine] liquidated ${pos.id} (${pos.key} ${pos.side} ${pos.leverage}x) pnl=${r.pnl.toFixed(2)} burn=${burnable.toFixed(2)}${badDebt > 0 ? ` BAD_DEBT=${badDebt.toFixed(2)}` : ""}`);
       }

@@ -562,6 +562,21 @@ app.get("/api/admin/hot-wallet", requireAdmin, async (_req, res) => {
     balance: hotWalletConfigured() ? await hotWalletBalance() : 0,
   });
 });
+// Insurance fund monitor — funded by INSURANCE_FUND_SHARE of every taker fee,
+// this is what actually absorbs bad debt now, before it ever hits the vault.
+app.get("/api/admin/insurance-fund", requireAdmin, async (_req, res) => {
+  const bal = (await pool.query(
+    `SELECT coalesce(sum(case when type='contribution' then amount_usd else -amount_usd end),0) balance,
+            coalesce(sum(case when type='contribution' then amount_usd else 0 end),0) total_contributed,
+            coalesce(sum(case when type='payout' then amount_usd else 0 end),0) total_paid_out
+     FROM insurance_fund_ledger`
+  )).rows[0];
+  res.json({
+    balance: Number(bal.balance),
+    totalContributed: Number(bal.total_contributed),
+    totalPaidOut: Number(bal.total_paid_out),
+  });
+});
 // Bad debt monitor — total shortfall the vault has absorbed from
 // liquidations that filled past zero-equity (price gapped through the liq
 // price faster than the sweep could catch it). Watch this: steady growth

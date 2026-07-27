@@ -91,6 +91,19 @@ export async function initDb() {
       created_at  bigint NOT NULL
     );
     CREATE INDEX IF NOT EXISTS bad_debt_ledger_time_idx ON bad_debt_ledger(created_at DESC);
+    -- Insurance fund: a slice of every taker fee is set aside here first, and
+    -- bad debt draws from THIS before it ever touches the vault. Balance is
+    -- just sum(contribution) - sum(payout) over this ledger — no separate
+    -- balance column to drift out of sync.
+    CREATE TABLE IF NOT EXISTS insurance_fund_ledger (
+      id          text PRIMARY KEY,
+      type        text NOT NULL,        -- 'contribution' | 'payout'
+      amount_usd  double precision NOT NULL,
+      position_id text,
+      market_key  text,
+      created_at  bigint NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS insurance_fund_ledger_time_idx ON insurance_fund_ledger(created_at DESC);
   `);
   console.log("[db] schema ready");
 }
