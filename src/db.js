@@ -78,6 +78,19 @@ export async function initDb() {
       created_at bigint NOT NULL
     );
     CREATE INDEX IF NOT EXISTS burn_ledger_open_idx ON burn_ledger(burned_sig) WHERE burned_sig IS NULL;
+    -- Bad debt: a liquidation that filled with the price already past zero-
+    -- equity, so the trader's collateral didn't cover the full loss. The
+    -- house (vault) absorbs the shortfall by simply receiving less than it
+    -- theoretically should — this table is the only record that it happened,
+    -- so it can be monitored instead of silently eating into solvency.
+    CREATE TABLE IF NOT EXISTS bad_debt_ledger (
+      id          text PRIMARY KEY,
+      position_id text,
+      market_key  text,
+      amount_usd  double precision NOT NULL,
+      created_at  bigint NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS bad_debt_ledger_time_idx ON bad_debt_ledger(created_at DESC);
   `);
   console.log("[db] schema ready");
 }

@@ -562,6 +562,25 @@ app.get("/api/admin/hot-wallet", requireAdmin, async (_req, res) => {
     balance: hotWalletConfigured() ? await hotWalletBalance() : 0,
   });
 });
+// Bad debt monitor — total shortfall the vault has absorbed from
+// liquidations that filled past zero-equity (price gapped through the liq
+// price faster than the sweep could catch it). Watch this: steady growth
+// means the circuit breaker / liq-sweep frequency need tightening, not that
+// it's "just a rounding error".
+app.get("/api/admin/bad-debt", requireAdmin, async (req, res) => {
+  const days = Math.min(365, Number(req.query.days) || 30);
+  const since = Date.now() - days * 86400000;
+  const total = (await pool.query(
+    `SELECT coalesce(sum(amount_usd),0) total, count(*)::int n FROM bad_debt_ledger WHERE created_at > $1`, [since]
+  )).rows[0];
+  const byMarket = (await pool.query(
+    `SELECT market_key, sum(amount_usd) total, count(*)::int n FROM bad_debt_ledger WHERE created_at > $1 GROUP BY market_key ORDER BY total DESC`, [since]
+  )).rows;
+  const recent = (await pool.query(
+    `SELECT * FROM bad_debt_ledger ORDER BY created_at DESC LIMIT 50`
+  )).rows;
+  res.json({ windowDays: days, totalUsd: Number(total.total), count: total.n, byMarket, recent });
+});
 
 // --- oracle transparency: spot vs mark vs sources per market ---
 app.get("/api/oracle", (_req, res) => {

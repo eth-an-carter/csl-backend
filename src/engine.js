@@ -149,6 +149,15 @@ export async function liquidationSweep(markOf, fundingOf, markAgeOf = () => 0) {
             [randomUUID(), pos.key, Number(burnable.toFixed(6)), Date.now()]
           );
         } catch (e) { /* ledger is best-effort — never block a liquidation */ }
+        if (badDebt > 0) {
+          try {
+            await pool.query(
+              `INSERT INTO bad_debt_ledger (id, position_id, market_key, amount_usd, created_at)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [randomUUID(), pos.id, pos.key, Number(badDebt.toFixed(6)), Date.now()]
+            );
+          } catch (e) { /* ledger is best-effort — never block a liquidation */ }
+        }
         console.log(`[engine] liquidated ${pos.id} (${pos.key} ${pos.side} ${pos.leverage}x) pnl=${r.pnl.toFixed(2)} burn=${burnable.toFixed(2)}${badDebt > 0 ? ` BAD_DEBT=${badDebt.toFixed(2)}` : ""}`);
       }
     }
