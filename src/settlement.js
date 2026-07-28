@@ -8,7 +8,7 @@ import { publicClient, depositsEnabled, depositAddress, incomingUsdgTransfers, u
 import { getScanCursor, setScanCursor } from "./db.js";
 import { randomUUID } from "crypto";
 
-const MIN_WITHDRAW = Number(process.env.MIN_WITHDRAW || 5);
+const MIN_WITHDRAW = Number(process.env.MIN_WITHDRAW || 1);
 const MAX_AUTO_WITHDRAW = Number(process.env.MAX_AUTO_WITHDRAW || 100); // above this stays pending for manual approval
 const MAX_DEPOSIT_PER_USER = Number(process.env.MAX_DEPOSIT_PER_USER || 500);
 // withdrawal rate limits (drain protection)
