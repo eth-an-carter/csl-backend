@@ -601,11 +601,16 @@ app.post("/api/admin/deposits/sweep", requireAdmin, async (_req, res) => {
 // auto-approved withdrawals. Cold treasury balance isn't exposed here on
 // purpose: check that directly in your wallet/multisig, not through the app.
 app.get("/api/admin/hot-wallet", requireAdmin, async (_req, res) => {
-  res.json({
-    configured: hotWalletConfigured(),
-    address: hotWalletAddress(),
-    balance: hotWalletConfigured() ? await hotWalletBalance() : 0,
-  });
+  try {
+    res.json({
+      configured: hotWalletConfigured(),
+      address: hotWalletAddress(),
+      balance: hotWalletConfigured() ? await hotWalletBalance() : 0,
+    });
+  } catch (e) {
+    console.error("[hot-wallet]", e.message);
+    res.status(500).json({ error: "hot_wallet_error", message: e.message });
+  }
 });
 // Insurance fund monitor — funded by INSURANCE_FUND_SHARE of every taker fee,
 // this is what actually absorbs bad debt now, before it ever hits the vault.
