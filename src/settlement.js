@@ -233,6 +233,34 @@ export async function requestWithdrawal(privyId, amount, address) {
 }
 
 // Admin: reject a pending withdrawal and refund the user's balance.
+// Admin: retry paying out a withdrawal that's stuck 'pending' (e.g. the hot
+// wallet was dry on ETH gas when it first tried). Before this, the ONLY
+// recovery path for a stuck withdrawal was reject-to-refund — there was no
+// way to actually finish the payout once it failed once.
+export async function retryWithdrawalPayout(id) {
+  const w = (await pool.query(`SELECT privy_id, amount, address, status FROM withdrawals WHERE id=$1`, [id])).rows[0];
+  if (!w) return { error: "not_found" };
+  if (w.status !== "pending") return { error: "not_pending", status: w.status };
+  if (!hotWalletConfigured() || !publicClient) return { error: "hot_wallet_not_configured" };
+
+  const amount = Number(w.amount);
+  const hotBal = await hotWalletBalance();
+  if (hotBal < amount) return { error: "hot_wallet_insufficient", available: hotBal, needed: amount };
+
+  const claim = await pool.query(`UPDATE withdrawals SET status='processing' WHERE id=$1 AND status='pending' RETURNING id`, [id]);
+  if (claim.rowCount === 0) return { error: "not_pending" }; // someone else grabbed it first
+
+  try {
+    const hash = await payWithdrawal(w.address, amount);
+    await publicClient.waitForTransactionReceipt({ hash });
+    await pool.query(`UPDATE withdrawals SET status='sent', sig=$2 WHERE id=$1`, [id, hash]);
+    return { ok: true, status: "sent", sig: hash };
+  } catch (e) {
+    await pool.query(`UPDATE withdrawals SET status='pending' WHERE id=$1`, [id]).catch(() => {});
+    return { error: "payout_failed", message: e.message };
+  }
+}
+
 export async function rejectWithdrawal(id) {
   const client = await pool.connect();
   try {
