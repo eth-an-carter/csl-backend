@@ -40,6 +40,21 @@ const chain = {
 export const publicClient = RPC_URL ? createPublicClient({ chain, transport: http(RPC_URL) }) : null;
 export function depositsEnabled() { return Boolean(publicClient && MASTER && USDG_ADDRESS); }
 
+// Call once at boot — a missing RPC_URL (or seed/USDG address) silently
+// disables ALL deposit scanning and withdrawal payouts forever, with zero
+// runtime logging. This makes that impossible to miss.
+export function logChainStatus() {
+  const missing = [];
+  if (!RPC_URL) missing.push("RPC_URL");
+  if (!MASTER) missing.push("DEPOSIT_MASTER_SEED");
+  if (!USDG_ADDRESS) missing.push("USDG_ADDRESS");
+  if (missing.length) {
+    console.warn(`[chain] DEPOSITS DISABLED — missing env: ${missing.join(", ")}. No deposits will ever be credited and withdrawals cannot be paid until these are set.`);
+  } else {
+    console.log(`[chain] deposits enabled — RPC_URL set, USDG=${USDG_ADDRESS}`);
+  }
+}
+
 const ERC20_TRANSFER = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
 const ERC20_ABI = [
   parseAbiItem("function balanceOf(address) view returns (uint256)"),

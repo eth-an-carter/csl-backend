@@ -13,7 +13,7 @@ import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, p
 import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
-import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance } from "./chain.js";
+import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, logChainStatus } from "./chain.js";
 
 const PORT = process.env.PORT || 8080;
 const MOCK = process.env.MOCK !== "0"; // legacy flag
@@ -674,6 +674,7 @@ app.listen(PORT, "0.0.0.0", () => {
   setInterval(tick, POLL_MS);
   try { warmSteamHistory(MARKETS.map((m) => m.hash)); } catch (e) { console.error("[startup] steam:", e.message); }
   try { logSteamAuthStatus(); } catch (e) { /* diagnostic only */ }
+  try { logChainStatus(); } catch (e) { /* diagnostic only */ }
   initDb()
     .then(() => { if (process.env.DATABASE_URL) return initSettlementTables(); })
     .then(() => restoreRings())   // table exists by now — rehydrate the 24h ring
