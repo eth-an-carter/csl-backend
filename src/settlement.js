@@ -4,7 +4,8 @@
 //   withdrawals — requests always recorded; auto-payout when TREASURY_SECRET is set
 //   vault       — accepts deposits only when VAULT_OPEN=1
 import { pool, ensureUser } from "./db.js";
-import { publicClient, depositsEnabled, depositAddress, incomingUsdgTransfers, usdgBalanceOf, sweepDepositToTreasury, payWithdrawal, treasuryAddress, isValidAddress, hotWalletConfigured, hotWalletBalance } from "./chain.js";
+import { publicClient, depositsEnabled, depositAddress, incomingUsdgTransfers, usdgBalanceOf, sweepDepositToTreasury, payWithdrawal, treasuryAddress, isValidAddress, hotWalletConfigured, hotWalletBalance, DEPOSIT_CONFIRMATIONS } from "./chain.js";
+import { getScanCursor, setScanCursor } from "./db.js";
 import { randomUUID } from "crypto";
 
 const MIN_WITHDRAW = Number(process.env.MIN_WITHDRAW || 5);
@@ -60,12 +61,34 @@ export async function getDepositInfo(privyId) {
 // DB retries, and double-scans. Respects the per-user deposit cap.
 export async function scanDeposits() {
   if (!depositsEnabled()) return;
+
+  // Persisted cursor: without this, every scan used a ROLLING "latest - 50000
+  // blocks" window with no memory of where it left off. A deposit that
+  // wasn't successfully credited yet (e.g. an RPC 429, or the ON CONFLICT bug)
+  // would silently fall out the back of that window once enough real time
+  // passed — gone forever, even though it was never actually processed.
+  const CURSOR_KEY = "deposit_scan_from_block";
+  let latest;
+  try { latest = await publicClient.getBlockNumber(); } catch (e) { console.warn("[deposits] getBlockNumber failed:", e.message); return; }
+  const safeTip = latest > BigInt(DEPOSIT_CONFIRMATIONS) ? latest - BigInt(DEPOSIT_CONFIRMATIONS) : 0n;
+
+  const savedCursor = await getScanCursor(CURSOR_KEY);
+  // First-ever run (no cursor yet): look back much further than the normal
+  // steady-state window, specifically to sweep up anything missed by earlier
+  // bugs (the ON CONFLICT crash, RPC 429s) before this cursor existed at all.
+  // ~1,000,000 blocks at ~100ms/block is roughly a day — a one-time cost.
+  const INITIAL_LOOKBACK = 1_000_000n;
+  const fromBlock = savedCursor != null ? BigInt(savedCursor) : (safeTip > INITIAL_LOOKBACK ? safeTip - INITIAL_LOOKBACK : 0n);
+  if (fromBlock > safeTip) return; // nothing new and confirmed yet
+
   const users = (await pool.query(`SELECT privy_id FROM users`)).rows;
+  let anyFailure = false;
   for (const { privy_id } of users) {
     try {
       const addr = depositAddress(privy_id);
 
-      const transfers = await incomingUsdgTransfers(addr, {});
+      const transfers = await incomingUsdgTransfers(addr, { fromBlock, toBlock: safeTip });
+      if (transfers === null) { anyFailure = true; continue; } // RPC call failed — do NOT advance the cursor past this window
       if (!transfers.length) continue;
 
       // oldest → newest so credits apply in chain order
@@ -118,6 +141,16 @@ export async function scanDeposits() {
     } catch (e) {
       console.warn("[deposits] scan error:", e.message);
     }
+  }
+
+  // advance the cursor — next cycle starts right after where this one ended,
+  // regardless of how much real time passes before the next successful run.
+  // If ANY per-user call failed (RPC error/rate-limit), do NOT advance —
+  // retry this exact same window next cycle instead of skipping it forever.
+  if (!anyFailure) {
+    try { await setScanCursor(CURSOR_KEY, Number(safeTip) + 1); } catch (e) { console.warn("[deposits] cursor save failed:", e.message); }
+  } else {
+    console.warn(`[deposits] one or more RPC calls failed this cycle — cursor NOT advanced, will retry blocks ${fromBlock}-${safeTip} next time`);
   }
 }
 

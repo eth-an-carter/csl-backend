@@ -104,6 +104,16 @@ export async function initDb() {
       created_at  bigint NOT NULL
     );
     CREATE INDEX IF NOT EXISTS insurance_fund_ledger_time_idx ON insurance_fund_ledger(created_at DESC);
+    -- persisted cursor(s) for anything that scans the chain incrementally.
+    -- Without this, the deposit scanner had no memory of where it left off:
+    -- it always looked at "latest - 50000 blocks", a ROLLING window that
+    -- silently drops a deposit forever once enough time passes for its block
+    -- to fall out the back of that window — even though it was never
+    -- actually scanned successfully in the first place (e.g. an RPC 429).
+    CREATE TABLE IF NOT EXISTS scan_state (
+      key   text PRIMARY KEY,
+      value bigint NOT NULL
+    );
   `);
   console.log("[db] schema ready");
 }
@@ -166,6 +176,18 @@ export async function loadDailyCloses() {
   return m;
 }
 
+// Persisted scan cursor — see scan_state table comment for why this matters.
+export async function getScanCursor(key) {
+  const r = (await pool.query(`SELECT value FROM scan_state WHERE key=$1`, [key])).rows[0];
+  return r ? Number(r.value) : null;
+}
+export async function setScanCursor(key, value) {
+  await pool.query(
+    `INSERT INTO scan_state (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`,
+    [key, value]
+  );
+}
+
 export async function ensureUser(privyId) {
   await pool.query(
     `INSERT INTO users (privy_id, created_at) VALUES ($1, $2) ON CONFLICT (privy_id) DO NOTHING`,
@@ -177,6 +199,6 @@ export async function getAccount(privyId) {
   await ensureUser(privyId);
   const u = (await pool.query(`SELECT balance, volume, realized, trades FROM users WHERE privy_id=$1`, [privyId])).rows[0];
   const positions = (await pool.query(`SELECT * FROM positions WHERE privy_id=$1 ORDER BY opened_at DESC`, [privyId])).rows;
-  const history = (await pool.query(`SELECT * FROM trades WHERE privy_id=$1 ORDER BY closed_at DESC LIMIT 50`, [privyId])).rows;
+  const history = (await pool.query(`SELECT * FROM trades WHERE privy_id=$1 ORDER BY closed_at DESC LIMIT 500`, [privyId])).rows;
   return { ...u, positions, history };
 }
