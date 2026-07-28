@@ -88,7 +88,7 @@ export async function scanDeposits() {
             // and the excess sits on the deposit address for manual handling.
             await client.query(
               `INSERT INTO deposits (id, privy_id, amount, address, sig, slot, credited_at)
-               VALUES ($1,$2,0,$3,$4,$5,$6) ON CONFLICT (sig) DO NOTHING`,
+               VALUES ($1,$2,0,$3,$4,$5,$6) ON CONFLICT (sig) WHERE sig IS NOT NULL DO NOTHING`,
               [randomUUID(), privy_id, addr, t.sig, t.block, Date.now()]
             );
             await client.query("COMMIT");
@@ -99,7 +99,7 @@ export async function scanDeposits() {
           // idempotent insert: if this sig was already credited, INSERT does nothing
           const ins = await client.query(
             `INSERT INTO deposits (id, privy_id, amount, address, sig, slot, credited_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (sig) DO NOTHING RETURNING id`,
+             VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (sig) WHERE sig IS NOT NULL DO NOTHING RETURNING id`,
             [randomUUID(), privy_id, allowed, addr, t.sig, t.block, Date.now()]
           );
           if (ins.rowCount === 0) { await client.query("ROLLBACK"); continue; } // already credited
