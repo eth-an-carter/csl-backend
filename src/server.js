@@ -417,6 +417,32 @@ function spliceHistory(steamCandles, ownCandles) {
   return { result: { candles, gap }, stats };
 }
 
+// Real intraday candles for sub-day timeframes (15m/1H/4H), built from the
+// 5-min ring buffer we already keep (~26h deep). Previously every timeframe
+// below 1W just re-showed the same DAILY bucketing — selecting 1H/4H did
+// nothing. This buckets the actual 5-min ticks at the requested granularity.
+const INTRADAY_BUCKET_SEC = { "15m": 900, "1H": 3600, "4H": 14400 };
+app.get("/api/intraday/:key", (req, res) => {
+  const m = MARKETS.find((x) => x.key === req.params.key);
+  if (!m) return res.status(404).json({ error: "not_found" });
+  const tf = String(req.query.tf || "1H");
+  const bucketSec = INTRADAY_BUCKET_SEC[tf];
+  if (!bucketSec) return res.status(400).json({ error: "bad_tf" });
+
+  const samples = ring.get(m.key) || [];
+  if (!samples.length) return res.json({ key: m.key, tf: bucketSec, candles: [] });
+
+  const byBucket = new Map();
+  for (const s of samples) {
+    const bt = Math.floor(s.t / 1000 / bucketSec) * bucketSec;
+    const c = byBucket.get(bt);
+    if (!c) byBucket.set(bt, { time: bt, open: s.price, high: s.price, low: s.price, close: s.price });
+    else { c.high = Math.max(c.high, s.price); c.low = Math.min(c.low, s.price); c.close = s.price; }
+  }
+  const candles = [...byBucket.values()].sort((a, b) => a.time - b.time);
+  res.json({ key: m.key, tf: bucketSec, real: true, source: "intraday", candles });
+});
+
 app.get("/api/history/:key", async (req, res) => {
   const m = MARKETS.find((x) => x.key === req.params.key);
   if (!m) return res.status(404).json({ error: "not_found" });
