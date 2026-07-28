@@ -29,6 +29,14 @@ const EMA_TAU_MS = Number(process.env.ORACLE_TWAP_WINDOW_MS || 60_000);
 export const MARK_STALE_MS = Number(process.env.ORACLE_MARK_STALE_MS || 360_000); // > Skinport 300s poll
 // minimum sources that must agree for a fresh spot to be accepted
 const MIN_SOURCES = Number(process.env.ORACLE_MIN_SOURCES || 1);
+// max fraction the mark is allowed to move toward a fresh spot IN ONE REFRESH
+// CYCLE. The cross-source median guard above only helps when 2+ sources
+// disagree — several markets only have Skinport active, so a single bad tick
+// there had nothing to check itself against. This clamps the input to the EMA
+// itself: a real, sustained move still gets there within a few cycles (each
+// one can go another MAX_SPOT_JUMP further); a one-tick glitch gets capped
+// instead of blowing the mark out in a single update.
+const MAX_SPOT_JUMP = Number(process.env.ORACLE_MAX_SPOT_JUMP || 0.25); // 25% per cycle
 
 // which feeds to consult. Skinport is free/keyless; lis-skins needs a key and
 // simply returns null (ignored) until configured. Add more here later.
@@ -135,10 +143,17 @@ export async function refreshOracle(markets) {
       st.mark = rs.spot;
       st.live = true;
     } else {
-      // EMA toward the new robust spot, weighted by elapsed time
+      // clamp the spot BEFORE it enters the EMA — see MAX_SPOT_JUMP above
+      const maxUp = st.mark * (1 + MAX_SPOT_JUMP);
+      const maxDown = st.mark * (1 - MAX_SPOT_JUMP);
+      const clampedSpot = Math.min(maxUp, Math.max(maxDown, rs.spot));
+      if (clampedSpot !== rs.spot) {
+        console.warn(`[oracle] ${m.key}: spot $${rs.spot} clamped to $${clampedSpot.toFixed(2)} (>${(MAX_SPOT_JUMP * 100).toFixed(0)}% jump from mark $${st.mark.toFixed(2)} in one cycle)`);
+      }
+      // EMA toward the (clamped) spot, weighted by elapsed time
       const dt = Math.max(1, now - st.updatedAt);
       const alpha = 1 - Math.exp(-dt / EMA_TAU_MS);
-      st.mark = st.mark + alpha * (rs.spot - st.mark);
+      st.mark = st.mark + alpha * (clampedSpot - st.mark);
     }
     st.spot = rs.spot;
     st.mark = Math.round(st.mark * 100) / 100;
@@ -211,9 +226,13 @@ export function pushMockSpot(key, spot) {
   if (!st) { st = { spot, mark: spot, updatedAt: now, sources: 1, live: true }; book.set(key, st); }
   if (!st.live) { st.mark = spot; st.live = true; }
   else {
+    // same one-cycle jump clamp as refreshOracle — see MAX_SPOT_JUMP
+    const maxUp = st.mark * (1 + MAX_SPOT_JUMP);
+    const maxDown = st.mark * (1 - MAX_SPOT_JUMP);
+    const clampedSpot = Math.min(maxUp, Math.max(maxDown, spot));
     const dt = Math.max(1, now - st.updatedAt);
     const alpha = 1 - Math.exp(-dt / EMA_TAU_MS);
-    st.mark = st.mark + alpha * (spot - st.mark);
+    st.mark = st.mark + alpha * (clampedSpot - st.mark);
   }
   st.spot = spot;
   st.mark = Math.round(st.mark * 100) / 100;
