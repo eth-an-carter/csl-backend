@@ -24,7 +24,14 @@ import { fetchCsfloatPrices, csfloatEnabled } from "./csfloat.js";
 const OUTLIER_DEV = Number(process.env.ORACLE_OUTLIER_DEV || 0.08); // 8%
 // EMA time-constant in ms — how quickly the mark absorbs a sustained spot move.
 // mark += (1 - e^(-dt/tau)) * (spot - mark). Longer = smoother/harder to shove.
-const EMA_TAU_MS = Number(process.env.ORACLE_TWAP_WINDOW_MS || 60_000);
+// IMPORTANT: this must be comparable to (or larger than) the poll interval, or
+// the smoothing does essentially nothing. At tau=60s with a 5-min Skinport
+// poll, alpha per update was ~0.99 — the mark jumped almost FULLY to whatever
+// Skinport reported every single poll, with no real cross-poll averaging at
+// all. That's what was showing up as a "flying"/zigzag chart on thin-listing
+// skins: normal poll-to-poll noise in Skinport's own reported price was
+// passing through nearly unfiltered. 20 minutes smooths across ~4 polls.
+const EMA_TAU_MS = Number(process.env.ORACLE_TWAP_WINDOW_MS || 1_200_000);
 // a mark older than this is considered stale (engine skips liquidations on it)
 export const MARK_STALE_MS = Number(process.env.ORACLE_MARK_STALE_MS || 360_000); // > Skinport 300s poll
 // minimum sources that must agree for a fresh spot to be accepted
