@@ -106,6 +106,142 @@ export async function openPosition(privyId, market, mark, { side, collateral, le
   } finally { client.release(); }
 }
 
+// ---- limit orders ------------------------------------------------------------
+// A limit order reserves its collateral immediately (so a user can't place
+// more orders than their balance covers), sits in `limit_orders` until the
+// mark crosses the target, then fills through the exact same position-
+// creation path openPosition uses — just skipping the balance deduction for
+// collateral, since that already happened at order time.
+export const MIN_ORDER_LIFETIME_MS = 0; // reserved for future TTL/expiry support
+
+export async function createLimitOrder(privyId, market, { side, collateral, leverage, limitPrice }) {
+  collateral = Number(collateral); leverage = Math.floor(Number(leverage)); limitPrice = Number(limitPrice);
+  if (!["long", "short"].includes(side)) return { error: "bad_side" };
+  if (!Number.isFinite(collateral) || collateral <= 0) return { error: "bad_collateral" };
+  if (collateral < MIN_COLLATERAL) return { error: "min_collateral", min: MIN_COLLATERAL };
+  if (!Number.isFinite(leverage) || leverage < 1 || leverage > MAX_LEVERAGE) return { error: "bad_leverage", max: MAX_LEVERAGE };
+  if (collateral > MAX_COLLATERAL_PER_POSITION) return { error: "collateral_cap", max: MAX_COLLATERAL_PER_POSITION };
+  if (!Number.isFinite(limitPrice) || limitPrice <= 0) return { error: "bad_limit_price" };
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await ensureUser(privyId);
+    const u = (await client.query(`SELECT balance FROM users WHERE privy_id=$1 FOR UPDATE`, [privyId])).rows[0];
+    if (!u || u.balance < collateral) { await client.query("ROLLBACK"); return { error: "insufficient_balance" }; }
+
+    const cnt = (await client.query(
+      `SELECT count(*)::int c FROM (
+         SELECT id FROM positions WHERE privy_id=$1
+         UNION ALL SELECT id FROM limit_orders WHERE privy_id=$1 AND status='open'
+       ) x`, [privyId]
+    )).rows[0].c;
+    if (cnt >= MAX_POSITIONS_PER_USER) { await client.query("ROLLBACK"); return { error: "positions_cap", max: MAX_POSITIONS_PER_USER }; }
+
+    const order = {
+      id: randomUUID(), key: market.key, side, leverage, collateral, limit_price: limitPrice, created_at: Date.now(),
+    };
+    // reserve the collateral now — refunded on cancel, or spent (plus fee) on fill
+    await client.query(`UPDATE users SET balance=balance-$2 WHERE privy_id=$1`, [privyId, collateral]);
+    await client.query(
+      `INSERT INTO limit_orders (id, privy_id, key, side, leverage, collateral, limit_price, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8)`,
+      [order.id, privyId, order.key, order.side, order.leverage, order.collateral, order.limit_price, order.created_at]
+    );
+    await client.query("COMMIT");
+    return { ok: true, order };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("[engine] limit order error:", e.message);
+    return { error: "internal" };
+  } finally { client.release(); }
+}
+
+export async function cancelLimitOrder(privyId, id) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const o = (await client.query(`SELECT * FROM limit_orders WHERE id=$1 AND privy_id=$2 AND status='open' FOR UPDATE`, [id, privyId])).rows[0];
+    if (!o) { await client.query("ROLLBACK"); return { error: "not_found" }; }
+    await client.query(`UPDATE limit_orders SET status='cancelled' WHERE id=$1`, [id]);
+    await client.query(`UPDATE users SET balance=balance+$2 WHERE privy_id=$1`, [privyId, Number(o.collateral)]);
+    await client.query("COMMIT");
+    return { ok: true };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("[engine] cancel limit order error:", e.message);
+    return { error: "internal" };
+  } finally { client.release(); }
+}
+
+// Periodic check — same cadence as the liquidation sweep. Fills a limit order
+// the moment the mark crosses its target: long fills at-or-below the limit
+// (buy at that price or better), short fills at-or-above (sell at that price
+// or better) — standard limit-order semantics.
+export async function limitOrderSweep(markOf, markAgeOf, MARKETS) {
+  const open = (await pool.query(`SELECT * FROM limit_orders WHERE status='open'`)).rows;
+  for (const o of open) {
+    const mark = markOf(o.key);
+    if (!Number.isFinite(mark) || mark <= 0) continue;
+    if ((markAgeOf(o.key) || 0) > PRICE_MAX_AGE_MS) continue; // don't fill on a stale price
+    if (circuitBreakerTripped(o.key)) continue; // same protection a market order gets
+
+    const triggered = o.side === "long" ? mark <= Number(o.limit_price) : mark >= Number(o.limit_price);
+    if (!triggered) continue;
+
+    const market = MARKETS.find((m) => m.key === o.key);
+    if (!market) continue;
+
+    const collateral = Number(o.collateral);
+    const leverage = Number(o.leverage);
+    const notional = collateral * leverage;
+    const fee = notional * TAKER_FEE;
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      // re-check under lock: someone else's sweep pass, or a cancel, might have gotten there first
+      const claim = await client.query(`UPDATE limit_orders SET status='filled', filled_at=$2 WHERE id=$1 AND status='open' RETURNING id`, [o.id, Date.now()]);
+      if (claim.rowCount === 0) { await client.query("ROLLBACK"); continue; }
+
+      const u = (await client.query(`SELECT balance FROM users WHERE privy_id=$1 FOR UPDATE`, [o.privy_id])).rows[0];
+      if (!u || u.balance < fee) {
+        // collateral was already reserved but there's not enough left for the
+        // fee (shouldn't normally happen) — refund the reservation and drop the order
+        await client.query(`UPDATE limit_orders SET status='cancelled' WHERE id=$1`, [o.id]);
+        await client.query(`UPDATE users SET balance=balance+$2 WHERE privy_id=$1`, [o.privy_id, collateral]);
+        await client.query("COMMIT");
+        continue;
+      }
+
+      const pos = {
+        id: randomUUID(), key: market.key, name: market.name, image: market.image,
+        side: o.side, entry: mark, collateral, leverage, notional,
+        units: notional / mark, liq: liqPrice(mark, o.side, leverage), opened_at: Date.now(),
+      };
+      // collateral already reserved at order time — only the fee comes off balance now
+      await client.query(`UPDATE users SET balance=balance-$2, volume=volume+$3, trades=trades+1 WHERE privy_id=$1`,
+        [o.privy_id, fee, notional]);
+      await client.query(
+        `INSERT INTO positions (id,privy_id,key,name,image,side,entry,collateral,leverage,notional,units,liq,opened_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [pos.id, o.privy_id, pos.key, pos.name, pos.image, pos.side, pos.entry, pos.collateral, pos.leverage, pos.notional, pos.units, pos.liq, pos.opened_at]
+      );
+      const insuranceCut = fee * INSURANCE_FUND_SHARE;
+      await client.query(
+        `INSERT INTO insurance_fund_ledger (id, type, amount_usd, market_key, created_at) VALUES ($1,'contribution',$2,$3,$4)`,
+        [randomUUID(), Number(insuranceCut.toFixed(6)), market.key, Date.now()]
+      );
+      await client.query(`UPDATE limit_orders SET position_id=$2 WHERE id=$1`, [o.id, pos.id]);
+      await client.query("COMMIT");
+      console.log(`[engine] limit order filled: ${o.id} -> position ${pos.id} (${o.key} ${o.side} @ $${mark})`);
+    } catch (e) {
+      await client.query("ROLLBACK");
+      console.error("[engine] limit fill error:", e.message);
+    } finally { client.release(); }
+  }
+}
+
 export async function closePosition(privyId, id, markOf, fundingOf, reason = "close") {
   const client = await pool.connect();
   try {

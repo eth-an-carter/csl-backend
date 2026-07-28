@@ -11,7 +11,7 @@ import { fetchSteamHistory, getSteamHistoryCached, getSteamIconCached, steamChar
 import { fetchInventory } from "./inventory.js";
 import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses } from "./db.js";
 import { requireAuth, authEnabled } from "./auth.js";
-import { openPosition, closePosition, liquidationSweep, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
+import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
 import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, logChainStatus } from "./chain.js";
 
@@ -534,6 +534,21 @@ app.post("/api/trade/close", rateLimit({ max: 30 }), requireAuth, async (req, re
   res.status(r.error ? 400 : 200).json(r);
 });
 
+app.post("/api/trade/limit", rateLimit({ max: 30 }), requireAuth, async (req, res) => {
+  if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
+  const { key, side, collateral, leverage, limitPrice } = req.body || {};
+  const m = MARKETS.find((x) => x.key === key);
+  if (!m) return res.status(400).json({ error: "bad_market" });
+  const r = await createLimitOrder(req.privyId, m, { side, collateral, leverage, limitPrice });
+  res.status(r.error ? 400 : 200).json(r);
+});
+
+app.delete("/api/trade/limit/:id", rateLimit({ max: 30 }), requireAuth, async (req, res) => {
+  if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
+  const r = await cancelLimitOrder(req.privyId, String(req.params.id || ""));
+  res.status(r.error ? 400 : 200).json(r);
+});
+
 // ---- settlement: deposits / withdrawals / vault -----------------------------
 app.get("/api/deposit", requireAuth, async (req, res) => {
   if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
@@ -682,6 +697,7 @@ app.listen(PORT, "0.0.0.0", () => {
   if (process.env.DATABASE_URL) {
     setInterval(() => scanDeposits().catch((e) => console.error("[deposits]", e.message)), 30000);
     setInterval(() => liquidationSweep(markOf, fundingOf, markAgeOf).catch((e) => console.error("[engine] sweep:", e.message)), 5000);
+    setInterval(() => limitOrderSweep(markOf, markAgeOf, MARKETS).catch((e) => console.error("[engine] limit sweep:", e.message)), 5000);
   }
 });
 

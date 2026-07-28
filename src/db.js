@@ -114,6 +114,23 @@ export async function initDb() {
       key   text PRIMARY KEY,
       value bigint NOT NULL
     );
+    -- pending limit orders: sit here until the mark crosses the limit price,
+    -- then get filled through the same openPosition() path a market order uses
+    CREATE TABLE IF NOT EXISTS limit_orders (
+      id          text PRIMARY KEY,
+      privy_id    text NOT NULL,
+      key         text NOT NULL,
+      side        text NOT NULL,          -- 'long' | 'short'
+      leverage    integer NOT NULL,
+      collateral  double precision NOT NULL,
+      limit_price double precision NOT NULL,
+      status      text NOT NULL DEFAULT 'open', -- open | filled | cancelled
+      created_at  bigint NOT NULL,
+      filled_at   bigint,
+      position_id text
+    );
+    CREATE INDEX IF NOT EXISTS limit_orders_open_idx ON limit_orders(key) WHERE status = 'open';
+    CREATE INDEX IF NOT EXISTS limit_orders_user_idx ON limit_orders(privy_id);
   `);
   console.log("[db] schema ready");
 }
@@ -200,5 +217,6 @@ export async function getAccount(privyId) {
   const u = (await pool.query(`SELECT balance, volume, realized, trades FROM users WHERE privy_id=$1`, [privyId])).rows[0];
   const positions = (await pool.query(`SELECT * FROM positions WHERE privy_id=$1 ORDER BY opened_at DESC`, [privyId])).rows;
   const history = (await pool.query(`SELECT * FROM trades WHERE privy_id=$1 ORDER BY closed_at DESC LIMIT 500`, [privyId])).rows;
-  return { ...u, positions, history };
+  const openOrders = (await pool.query(`SELECT * FROM limit_orders WHERE privy_id=$1 AND status='open' ORDER BY created_at DESC`, [privyId])).rows;
+  return { ...u, positions, history, openOrders };
 }
