@@ -9,7 +9,7 @@ import { csfloatDiag } from "./csfloat.js";
 import { fetchDailyHistory, historyEnabled } from "./history.js";
 import { fetchSteamHistory, getSteamHistoryCached, getSteamIconCached, steamChartEnabled, warmSteamHistory, logSteamAuthStatus } from "./steamchart.js";
 import { fetchInventory } from "./inventory.js";
-import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses } from "./db.js";
+import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses, saveAvatar, getLeaderboard } from "./db.js";
 import { requireAuth, authEnabled, issueNonce, verifySignatureAndIssueToken } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listDeposits, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, retryAllPendingWithdrawals, markWithdrawalSent, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
@@ -532,6 +532,21 @@ app.get("/api/account", requireAuth, async (req, res) => {
   if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
   try { res.json(await getAccount(req.privyId)); }
   catch (e) { console.error("[account]", e.message); res.status(500).json({ error: "internal" }); }
+});
+
+// Sync the profile-page avatar server-side, so OTHER users (leaderboard) see
+// the same image instead of just the person who set it in their own browser.
+app.post("/api/profile/avatar", rateLimit({ max: 10 }), requireAuth, async (req, res) => {
+  if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
+  const r = await saveAvatar(req.privyId, req.body?.dataUrl);
+  res.status(r.error ? 400 : 200).json(r);
+});
+
+// Real leaderboard, ranked by realized PnL. Public — no wallet required to view.
+app.get("/api/leaderboard", async (_req, res) => {
+  if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
+  try { res.json({ leaderboard: await getLeaderboard() }); }
+  catch (e) { console.error("[leaderboard]", e.message); res.status(500).json({ error: "internal" }); }
 });
 
 app.post("/api/trade/open", rateLimit({ max: 30 }), requireAuth, async (req, res) => {

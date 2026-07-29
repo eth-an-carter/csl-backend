@@ -131,6 +131,12 @@ export async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS limit_orders_open_idx ON limit_orders(key) WHERE status = 'open';
     CREATE INDEX IF NOT EXISTS limit_orders_user_idx ON limit_orders(privy_id);
+    -- users table already exists in production — CREATE TABLE IF NOT EXISTS
+    -- above won't add columns to it. ALTER explicitly, each one guarded so
+    -- reruns are harmless.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_data_url text;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS twitter_handle text;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS twitter_avatar_url text;
   `);
   console.log("[db] schema ready");
 }
@@ -214,9 +220,31 @@ export async function ensureUser(privyId) {
 
 export async function getAccount(privyId) {
   await ensureUser(privyId);
-  const u = (await pool.query(`SELECT balance, volume, realized, trades FROM users WHERE privy_id=$1`, [privyId])).rows[0];
+  const u = (await pool.query(`SELECT balance, volume, realized, trades, avatar_data_url, twitter_handle, twitter_avatar_url FROM users WHERE privy_id=$1`, [privyId])).rows[0];
   const positions = (await pool.query(`SELECT * FROM positions WHERE privy_id=$1 ORDER BY opened_at DESC`, [privyId])).rows;
   const history = (await pool.query(`SELECT * FROM trades WHERE privy_id=$1 ORDER BY closed_at DESC LIMIT 500`, [privyId])).rows;
   const openOrders = (await pool.query(`SELECT * FROM limit_orders WHERE privy_id=$1 AND status='open' ORDER BY created_at DESC`, [privyId])).rows;
   return { ...u, positions, history, openOrders };
+}
+
+// Avatar sync: the profile page generates a small (256x256) JPEG data URL
+// client-side — this just mirrors it server-side so OTHER users (leaderboard)
+// see the same avatar, not just the person who set it in their own browser.
+const MAX_AVATAR_BYTES = 200_000; // generous headroom over the ~256x256 JPEG the client sends
+export async function saveAvatar(privyId, dataUrl) {
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) return { error: "bad_image" };
+  if (dataUrl.length > MAX_AVATAR_BYTES) return { error: "too_large" };
+  await ensureUser(privyId);
+  await pool.query(`UPDATE users SET avatar_data_url=$2 WHERE privy_id=$1`, [privyId, dataUrl]);
+  return { ok: true };
+}
+
+// Real leaderboard — ranked by realized PnL, real users only (trades > 0).
+// Wallet is always shown (shortened); avatar/Twitter overlay it when set.
+export async function getLeaderboard(limit = 100) {
+  return (await pool.query(
+    `SELECT privy_id, volume, trades, realized, avatar_data_url, twitter_handle, twitter_avatar_url
+     FROM users WHERE trades > 0 ORDER BY realized DESC LIMIT $1`,
+    [limit]
+  )).rows;
 }
