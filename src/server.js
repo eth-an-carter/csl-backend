@@ -10,7 +10,7 @@ import { fetchDailyHistory, historyEnabled } from "./history.js";
 import { fetchSteamHistory, getSteamHistoryCached, getSteamIconCached, steamChartEnabled, warmSteamHistory, logSteamAuthStatus } from "./steamchart.js";
 import { fetchInventory } from "./inventory.js";
 import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses } from "./db.js";
-import { requireAuth, authEnabled } from "./auth.js";
+import { requireAuth, authEnabled, issueNonce, verifySignatureAndIssueToken } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listDeposits, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, retryAllPendingWithdrawals, markWithdrawalSent, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
 import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, fundHotWalletFromTreasury, autoRefillHotWallet, logChainStatus } from "./chain.js";
@@ -513,6 +513,21 @@ app.get("/api/inventory/:steamid", async (req, res) => {
 });
 
 // ---- authenticated account & trading ---------------------------------------
+// ---- wallet sign-in (SIWE-style) ---------------------------------------------
+// Replaces trusting a bare x-wallet header: the wallet proves it controls the
+// address by signing a one-time nonce, THEN the server issues a session token.
+app.get("/api/auth/nonce", rateLimit({ max: 20 }), (req, res) => {
+  const address = String(req.query.address || "");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return res.status(400).json({ error: "bad_address" });
+  res.json(issueNonce(address));
+});
+
+app.post("/api/auth/verify", rateLimit({ max: 20 }), async (req, res) => {
+  const { address, signature } = req.body || {};
+  const r = await verifySignatureAndIssueToken(address, signature);
+  res.status(r.error ? 401 : 200).json(r);
+});
+
 app.get("/api/account", requireAuth, async (req, res) => {
   if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
   try { res.json(await getAccount(req.privyId)); }
