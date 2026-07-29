@@ -157,12 +157,18 @@ export async function fundHotWalletFromTreasury(amount) {
   if (!publicClient || !process.env.TREASURY_PRIVKEY) throw new Error("treasury_privkey_not_set");
   if (!hotWalletConfigured()) throw new Error("hot_wallet_not_configured");
   const treasury = privateKeyToAccount(process.env.TREASURY_PRIVKEY);
+  const treasuryBal = await usdgBalanceOf(treasury.address);
+  if (treasuryBal < amount) throw new Error(`treasury_insufficient: has $${treasuryBal}, requested $${amount}`);
   const wallet = createWalletClient({ account: treasury, chain, transport: http(RPC_URL) });
   const hash = await wallet.writeContract({
     address: getAddress(USDG_ADDRESS), abi: ERC20_ABI, functionName: "transfer",
     args: [getAddress(hotWalletAddress()), parseUnits(String(amount), USDG_DECIMALS)],
     gas: 150000n, // explicit — a plain ERC-20 transfer needs ~60-80k; this leaves headroom without tripping the network's cap
   });
+  // don't report success until the chain actually confirms it — a reverted
+  // tx (e.g. this exact insufficient-balance case) still returns a hash
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  if (receipt.status !== "success") throw new Error(`transfer_reverted: ${hash}`);
   return hash;
 }
 // Current USDG balance actually sitting in the hot wallet — checked before
