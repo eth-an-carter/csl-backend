@@ -78,7 +78,10 @@ export async function usdgBalanceOf(address) {
   try {
     const raw = await publicClient.readContract({ address: getAddress(USDG_ADDRESS), abi: ERC20_ABI, functionName: "balanceOf", args: [getAddress(address)] });
     return Number(formatUnits(raw, USDG_DECIMALS));
-  } catch { return 0; }
+  } catch (e) {
+    console.warn(`[chain] usdgBalanceOf(${address}) failed — returning 0, but this is NOT necessarily the real balance:`, e.message);
+    return 0;
+  }
 }
 
 // Incoming USDG transfers to `address`, idempotent by tx hash+logIndex. Scans
