@@ -261,6 +261,27 @@ export async function retryWithdrawalPayout(id) {
   }
 }
 
+// Admin: mark a withdrawal 'sent' WITHOUT sending anything — for the exact
+// case where the on-chain transfer actually succeeded but the status update
+// afterward never landed (a crash/restart between the two). Retrying a
+// withdrawal stuck like this would double-pay it; this just corrects the
+// record to match reality.
+export async function markWithdrawalSent(id, sig) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const w = (await client.query(`SELECT status FROM withdrawals WHERE id=$1 FOR UPDATE`, [id])).rows[0];
+    if (!w) { await client.query("ROLLBACK"); return { error: "not_found" }; }
+    if (w.status === "sent") { await client.query("ROLLBACK"); return { error: "already_sent" }; }
+    await client.query(`UPDATE withdrawals SET status='sent', sig=$2 WHERE id=$1`, [id, sig || null]);
+    await client.query("COMMIT");
+    return { ok: true };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    return { error: "internal" };
+  } finally { client.release(); }
+}
+
 export async function rejectWithdrawal(id) {
   const client = await pool.connect();
   try {

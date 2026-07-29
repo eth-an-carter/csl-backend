@@ -12,7 +12,7 @@ import { fetchInventory } from "./inventory.js";
 import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses } from "./db.js";
 import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
-import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
+import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, markWithdrawalSent, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
 import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, fundHotWalletFromTreasury, logChainStatus } from "./chain.js";
 
 const PORT = process.env.PORT || 8080;
@@ -588,6 +588,10 @@ app.post("/api/admin/withdrawals/:id/reject", requireAdmin, async (req, res) => 
 });
 app.post("/api/admin/withdrawals/:id/retry", requireAdmin, async (req, res) => {
   const r = await retryWithdrawalPayout(String(req.params.id));
+  res.status(r.error ? 400 : 200).json(r);
+});
+app.post("/api/admin/withdrawals/:id/mark-sent", requireAdmin, async (req, res) => {
+  const r = await markWithdrawalSent(String(req.params.id), req.body?.sig);
   res.status(r.error ? 400 : 200).json(r);
 });
 // admin: list deposit addresses holding USDG + sweep them to treasury
