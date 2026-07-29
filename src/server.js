@@ -731,6 +731,7 @@ app.listen(PORT, "0.0.0.0", () => {
     setInterval(() => scanDeposits().catch((e) => console.error("[deposits]", e.message)), 30000);
     setInterval(() => liquidationSweep(markOf, fundingOf, markAgeOf).catch((e) => console.error("[engine] sweep:", e.message)), 5000);
     setInterval(() => limitOrderSweep(markOf, markAgeOf, MARKETS).catch((e) => console.error("[engine] limit sweep:", e.message)), 5000);
+    setInterval(() => sweepAllDeposits().catch((e) => console.error("[deposits] auto-sweep:", e.message)), 60000);
     setInterval(() => autoRefillHotWallet().catch((e) => console.error("[chain] auto-refill:", e.message)), 120000);
     setInterval(() => retryAllPendingWithdrawals().catch((e) => console.error("[withdraw] auto-retry:", e.message)), 120000);
   }
