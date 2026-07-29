@@ -13,7 +13,7 @@ import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, p
 import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
-import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, logChainStatus } from "./chain.js";
+import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, fundHotWalletFromTreasury, logChainStatus } from "./chain.js";
 
 const PORT = process.env.PORT || 8080;
 const MOCK = process.env.MOCK !== "0"; // legacy flag
@@ -610,6 +610,21 @@ app.get("/api/admin/hot-wallet", requireAdmin, async (_req, res) => {
   } catch (e) {
     console.error("[hot-wallet]", e.message);
     res.status(500).json({ error: "hot_wallet_error", message: e.message });
+  }
+});
+// One-off: move USDG from cold treasury into the hot wallet with an explicit
+// gas limit (MetaMask's own estimation was tripping Robinhood Chain's per-tx
+// gas cap). Needs TREASURY_PRIVKEY set TEMPORARILY in Railway — remove it
+// again right after using this once.
+app.post("/api/admin/fund-hot-wallet", requireAdmin, async (req, res) => {
+  try {
+    const amount = Number(req.body?.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: "bad_amount" });
+    const hash = await fundHotWalletFromTreasury(amount);
+    res.json({ ok: true, hash });
+  } catch (e) {
+    console.error("[fund-hot-wallet]", e.message);
+    res.status(500).json({ error: "fund_failed", message: e.message });
   }
 });
 // Insurance fund monitor — funded by INSURANCE_FUND_SHARE of every taker fee,

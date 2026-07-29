@@ -146,6 +146,25 @@ export function hotWalletConfigured() { return Boolean(process.env.HOT_WALLET_PR
 export function hotWalletAddress() {
   return process.env.HOT_WALLET_PRIVKEY ? privateKeyToAccount(process.env.HOT_WALLET_PRIVKEY).address : null;
 }
+
+// One-off: move USDG from the COLD treasury into the HOT wallet with an
+// explicit, small gas limit — MetaMask's own gas estimation on Robinhood
+// Chain was producing a limit above the network's per-tx cap ("exceeds
+// maximum per-tx gas limit"), so we set it ourselves instead of guessing.
+// Needs TREASURY_PRIVKEY set TEMPORARILY (this is the one moment the server
+// touches the cold key) — remove the env var again right after using this.
+export async function fundHotWalletFromTreasury(amount) {
+  if (!publicClient || !process.env.TREASURY_PRIVKEY) throw new Error("treasury_privkey_not_set");
+  if (!hotWalletConfigured()) throw new Error("hot_wallet_not_configured");
+  const treasury = privateKeyToAccount(process.env.TREASURY_PRIVKEY);
+  const wallet = createWalletClient({ account: treasury, chain, transport: http(RPC_URL) });
+  const hash = await wallet.writeContract({
+    address: getAddress(USDG_ADDRESS), abi: ERC20_ABI, functionName: "transfer",
+    args: [getAddress(hotWalletAddress()), parseUnits(String(amount), USDG_DECIMALS)],
+    gas: 150000n, // explicit — a plain ERC-20 transfer needs ~60-80k; this leaves headroom without tripping the network's cap
+  });
+  return hash;
+}
 // Current USDG balance actually sitting in the hot wallet — checked before
 // every auto-payout attempt so we never try to send more than it holds, and
 // so we can warn Chase to top it up from cold storage before it runs dry.
