@@ -309,6 +309,10 @@ export async function listWithdrawals(privyId) {
   return (await pool.query(`SELECT id, amount, address, status, sig, created_at FROM withdrawals WHERE privy_id=$1 ORDER BY created_at DESC LIMIT 20`, [privyId])).rows;
 }
 
+export async function listDeposits(privyId) {
+  return (await pool.query(`SELECT id, amount, address, sig, credited_at FROM deposits WHERE privy_id=$1 AND amount > 0 ORDER BY credited_at DESC LIMIT 20`, [privyId])).rows;
+}
+
 // ---- vault --------------------------------------------------------------------
 export async function vaultStats() {
   const r = (await pool.query(`SELECT coalesce(sum(amount),0) tvl, count(distinct privy_id)::int depositors FROM vault_deposits`)).rows[0];

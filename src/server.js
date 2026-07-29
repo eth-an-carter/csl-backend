@@ -12,7 +12,7 @@ import { fetchInventory } from "./inventory.js";
 import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses } from "./db.js";
 import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
-import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, markWithdrawalSent, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
+import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listDeposits, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, markWithdrawalSent, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
 import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, fundHotWalletFromTreasury, logChainStatus } from "./chain.js";
 
 const PORT = process.env.PORT || 8080;
@@ -565,6 +565,11 @@ app.post("/api/withdraw", rateLimit({ max: 10 }), requireAuth, async (req, res) 
 app.get("/api/withdrawals", requireAuth, async (req, res) => {
   if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
   res.json({ withdrawals: await listWithdrawals(req.privyId) });
+});
+
+app.get("/api/deposits", requireAuth, async (req, res) => {
+  if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
+  res.json({ deposits: await listDeposits(req.privyId) });
 });
 
 app.get("/api/vault", async (_req, res) => {
