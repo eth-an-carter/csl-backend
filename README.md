@@ -18,19 +18,19 @@ Live CS2 skin market data for [csl.fun](https://csl.fun): curated markets, real-
 | Method | Path | Returns |
 |--------|------|---------|
 | GET | `/health` | status, active price source |
-| GET | `/api/markets` | all markets — price, 24h change, funding |
+| GET | `/api/markets` | all markets - price, 24h change, funding |
 | GET | `/api/markets/:key` | single market |
 | GET | `/api/candles/:key` | live OHLC series (1m base) |
 | GET | `/api/history/:key` | full daily history (real Steam Market data) |
 | GET | `/api/inventory/:steamid` | public CS2 inventory, CSL-tradable items flagged |
-| GET | `/api/stream` | SSE — snapshot + live price ticks |
+| GET | `/api/stream` | SSE - snapshot + live price ticks |
 
 ## Price sources
 
-→ **Skinport** — live lowest-listing prices, free public API, no key  
-→ **Steam Market** — full daily price history back to each skin's release  
-→ **lis-skins** — optional live source (API key required)  
-→ `SOURCE=mock` — deterministic simulated feed for local dev
+→ **Skinport** - live lowest-listing prices, free public API, no key  
+→ **Steam Market** - full daily price history back to each skin's release  
+→ **lis-skins** - optional live source (API key required)  
+→ `SOURCE=mock` - deterministic simulated feed for local dev
 
 ## Run
 
@@ -40,6 +40,6 @@ npm start                 # mock feed
 SOURCE=skinport npm start # live prices
 ```
 
-All configuration via env — see [`.env.example`](.env.example).
+All configuration via env - see [`.env.example`](.env.example).
 
-— [csl.fun](https://csl.fun) · [docs.csl.fun](https://docs.csl.fun) · [@csldotfun](https://x.com/csldotfun)
+- [csl.fun](https://csl.fun) · [docs.csl.fun](https://docs.csl.fun) · [@csldotfun](https://x.com/csldotfun)
