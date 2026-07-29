@@ -421,7 +421,7 @@ function spliceHistory(steamCandles, ownCandles) {
 // 5-min ring buffer we already keep (~26h deep). Previously every timeframe
 // below 1W just re-showed the same DAILY bucketing — selecting 1H/4H did
 // nothing. This buckets the actual 5-min ticks at the requested granularity.
-const INTRADAY_BUCKET_SEC = { "15m": 900, "1H": 3600, "4H": 14400 };
+const INTRADAY_BUCKET_SEC = { "5m": 300, "15m": 900, "1H": 3600, "4H": 14400 };
 app.get("/api/intraday/:key", (req, res) => {
   const m = MARKETS.find((x) => x.key === req.params.key);
   if (!m) return res.status(404).json({ error: "not_found" });
