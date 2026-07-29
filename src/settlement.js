@@ -305,6 +305,20 @@ export async function listPendingWithdrawals() {
   )).rows;
 }
 
+// Auto-retry every pending withdrawal on a schedule. Combined with
+// autoRefillHotWallet() in chain.js, this closes the loop end-to-end: hot
+// wallet tops itself up when low, and anything stuck 'pending' clears itself
+// the moment there's enough balance — no admin curl commands needed anymore.
+export async function retryAllPendingWithdrawals() {
+  const pending = await listPendingWithdrawals();
+  for (const w of pending) {
+    const r = await retryWithdrawalPayout(w.id);
+    if (r.ok) console.log(`[withdraw] auto-retry sent ${w.id} ($${w.amount}): ${r.sig}`);
+    else if (r.error !== "hot_wallet_insufficient") console.warn(`[withdraw] auto-retry ${w.id} failed:`, r.error, r.message || "");
+    // hot_wallet_insufficient is expected/quiet — autoRefillHotWallet will catch up, next sweep retries again
+  }
+}
+
 export async function listWithdrawals(privyId) {
   return (await pool.query(`SELECT id, amount, address, status, sig, created_at FROM withdrawals WHERE privy_id=$1 ORDER BY created_at DESC LIMIT 20`, [privyId])).rows;
 }

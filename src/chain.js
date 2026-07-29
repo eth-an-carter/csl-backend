@@ -174,6 +174,31 @@ export async function fundHotWalletFromTreasury(amount) {
   if (receipt.status !== "success") throw new Error(`transfer_reverted: ${hash}`);
   return hash;
 }
+
+// Fully automatic withdrawals need the hot wallet to never actually run dry.
+// This checks its balance periodically and tops it up from treasury the
+// moment it drops below a floor — no more manual fund-hot-wallet calls.
+// Requires TREASURY_PRIVKEY to stay set permanently (a deliberate tradeoff:
+// this reintroduces the server holding the cold key, in exchange for
+// withdrawals that just work without anyone watching a balance).
+const HOT_WALLET_MIN = Number(process.env.HOT_WALLET_MIN_BALANCE || 20);
+const HOT_WALLET_REFILL = Number(process.env.HOT_WALLET_REFILL_AMOUNT || 100);
+export async function autoRefillHotWallet() {
+  if (!process.env.TREASURY_PRIVKEY || !hotWalletConfigured()) return;
+  try {
+    const bal = await hotWalletBalance();
+    if (bal >= HOT_WALLET_MIN) return;
+    const treasury = privateKeyToAccount(process.env.TREASURY_PRIVKEY);
+    const treasuryBal = await usdgBalanceOf(treasury.address);
+    const amount = Math.min(HOT_WALLET_REFILL, treasuryBal);
+    if (amount < 1) { console.warn(`[chain] hot wallet low ($${bal}) but treasury only has $${treasuryBal} — nothing to refill with`); return; }
+    console.log(`[chain] hot wallet low ($${bal} < $${HOT_WALLET_MIN}) — auto-refilling $${amount} from treasury`);
+    const hash = await fundHotWalletFromTreasury(amount);
+    console.log(`[chain] auto-refill sent: ${hash}`);
+  } catch (e) {
+    console.error("[chain] auto-refill failed:", e.message);
+  }
+}
 // Current USDG balance actually sitting in the hot wallet — checked before
 // every auto-payout attempt so we never try to send more than it holds, and
 // so we can warn Chase to top it up from cold storage before it runs dry.

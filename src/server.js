@@ -12,8 +12,8 @@ import { fetchInventory } from "./inventory.js";
 import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses } from "./db.js";
 import { requireAuth, authEnabled } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
-import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listDeposits, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, markWithdrawalSent, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
-import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, fundHotWalletFromTreasury, logChainStatus } from "./chain.js";
+import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listDeposits, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, retryAllPendingWithdrawals, markWithdrawalSent, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
+import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, fundHotWalletFromTreasury, autoRefillHotWallet, logChainStatus } from "./chain.js";
 
 const PORT = process.env.PORT || 8080;
 const MOCK = process.env.MOCK !== "0"; // legacy flag
@@ -731,6 +731,8 @@ app.listen(PORT, "0.0.0.0", () => {
     setInterval(() => scanDeposits().catch((e) => console.error("[deposits]", e.message)), 30000);
     setInterval(() => liquidationSweep(markOf, fundingOf, markAgeOf).catch((e) => console.error("[engine] sweep:", e.message)), 5000);
     setInterval(() => limitOrderSweep(markOf, markAgeOf, MARKETS).catch((e) => console.error("[engine] limit sweep:", e.message)), 5000);
+    setInterval(() => autoRefillHotWallet().catch((e) => console.error("[chain] auto-refill:", e.message)), 120000);
+    setInterval(() => retryAllPendingWithdrawals().catch((e) => console.error("[withdraw] auto-retry:", e.message)), 120000);
   }
 });
 
