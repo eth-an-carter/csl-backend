@@ -248,3 +248,18 @@ export async function getLeaderboard(limit = 100) {
     [limit]
   )).rows;
 }
+
+// Platform-wide numbers for the leaderboard header — the standard perp-DEX
+// stat row (total volume, open interest, trades, active traders), not just
+// the per-trader rankings below it.
+export async function getPlatformStats() {
+  const vol = (await pool.query(`SELECT coalesce(sum(volume),0) v, coalesce(sum(trades),0) t, count(*) filter (where trades > 0) active FROM users`)).rows[0];
+  const oi = (await pool.query(`SELECT coalesce(sum(notional),0) v, count(*) c FROM positions`)).rows[0];
+  return {
+    totalVolume: Number(vol.v),
+    totalTrades: Number(vol.t),
+    activeTraders: Number(vol.active),
+    openInterest: Number(oi.v),
+    openPositions: Number(oi.c),
+  };
+}

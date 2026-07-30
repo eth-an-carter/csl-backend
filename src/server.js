@@ -9,7 +9,7 @@ import { csfloatDiag } from "./csfloat.js";
 import { fetchDailyHistory, historyEnabled } from "./history.js";
 import { fetchSteamHistory, getSteamHistoryCached, getSteamIconCached, steamChartEnabled, warmSteamHistory, logSteamAuthStatus } from "./steamchart.js";
 import { fetchInventory } from "./inventory.js";
-import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses, saveAvatar, getLeaderboard } from "./db.js";
+import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses, saveAvatar, getLeaderboard, getPlatformStats } from "./db.js";
 import { requireAuth, authEnabled, issueNonce, verifySignatureAndIssueToken } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listDeposits, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, retryAllPendingWithdrawals, markWithdrawalSent, vaultStats, vaultDeposit, vaultWithdraw, vaultPosition, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
@@ -547,6 +547,12 @@ app.get("/api/leaderboard", async (_req, res) => {
   if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
   try { res.json({ leaderboard: await getLeaderboard() }); }
   catch (e) { console.error("[leaderboard]", e.message); res.status(500).json({ error: "internal" }); }
+});
+
+app.get("/api/platform-stats", async (_req, res) => {
+  if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
+  try { res.json(await getPlatformStats()); }
+  catch (e) { console.error("[platform-stats]", e.message); res.status(500).json({ error: "internal" }); }
 });
 
 app.post("/api/trade/open", rateLimit({ max: 30 }), requireAuth, async (req, res) => {
