@@ -359,10 +359,29 @@ async function vaultNav() {
   return Number(d.s) - Number(w.s) + Number(fees.s) - Number(bad.s);
 }
 
+// Real historical return over a window — actual fee-share earned minus bad
+// debt absorbed in that period, from the timestamped ledgers. Not an APR
+// projection: with little volume this is honestly just "$X over N days",
+// and the % figure is only worth showing once there's a meaningful NAV to
+// measure it against.
+async function vaultPnlInWindow(days) {
+  const cutoff = Date.now() - days * 86400000;
+  const fees = (await pool.query(`SELECT coalesce(sum(amount_usd),0) s FROM vault_pnl_ledger WHERE type='fee_share' AND created_at > $1`, [cutoff])).rows[0];
+  const bad = (await pool.query(`SELECT coalesce(sum(amount_usd),0) s FROM bad_debt_ledger WHERE created_at > $1`, [cutoff])).rows[0];
+  return Number(fees.s) - Number(bad.s);
+}
+
 export async function vaultStats() {
   const d = (await pool.query(`SELECT coalesce(sum(amount),0) tvl, count(distinct privy_id)::int depositors FROM vault_deposits`)).rows[0];
   const nav = await vaultNav();
-  return { open: VAULT_OPEN, tvl: Number(d.tvl), depositors: d.depositors, nav: Math.round(nav * 100) / 100 };
+  const [pnl7d, pnl30d] = await Promise.all([vaultPnlInWindow(7), vaultPnlInWindow(30)]);
+  return {
+    open: VAULT_OPEN, tvl: Number(d.tvl), depositors: d.depositors, nav: Math.round(nav * 100) / 100,
+    return7d: Math.round(pnl7d * 100) / 100,
+    return30d: Math.round(pnl30d * 100) / 100,
+    return7dPct: nav > 0 ? Math.round((pnl7d / nav) * 10000) / 100 : null,
+    return30dPct: nav > 0 ? Math.round((pnl30d / nav) * 10000) / 100 : null,
+  };
 }
 
 export async function vaultDeposit(privyId, amount) {
