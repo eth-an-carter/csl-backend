@@ -13,7 +13,7 @@ import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, p
 import { requireAuth, authEnabled, issueNonce, verifySignatureAndIssueToken } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
 import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listDeposits, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, retryAllPendingWithdrawals, markWithdrawalSent, vaultStats, vaultDeposit, vaultWithdraw, vaultPosition, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
-import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, fundHotWalletFromTreasury, autoRefillHotWallet, logChainStatus } from "./chain.js";
+import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, fundHotWalletFromTreasury, autoRefillHotWallet, rescueStakingTokens, logChainStatus } from "./chain.js";
 
 const PORT = process.env.PORT || 8080;
 const MOCK = process.env.MOCK !== "0"; // legacy flag
@@ -675,6 +675,22 @@ app.post("/api/admin/fund-hot-wallet", requireAdmin, async (req, res) => {
   } catch (e) {
     console.error("[fund-hot-wallet]", e.message);
     res.status(500).json({ error: "fund_failed", message: e.message });
+  }
+});
+// One-command rescue for the CSL staking contract — pulls `amount` of
+// `token` (the staked $CSL, the USDG reward pool, or anything else stuck in
+// that contract) out to `to`. Same X-Admin-Token pattern as every other
+// admin command here. Needs STAKING_CONTRACT_ADDRESS + STAKING_OWNER_PRIVKEY
+// set once the staking contract is actually deployed.
+app.post("/api/admin/staking/rescue", requireAdmin, async (req, res) => {
+  try {
+    const { token, to, amount, decimals } = req.body || {};
+    if (!token || !to || !Number.isFinite(Number(amount)) || Number(amount) <= 0) return res.status(400).json({ error: "bad_params" });
+    const hash = await rescueStakingTokens(token, to, amount, decimals ? Number(decimals) : 18);
+    res.json({ ok: true, hash });
+  } catch (e) {
+    console.error("[staking-rescue]", e.message);
+    res.status(500).json({ error: "rescue_failed", message: e.message });
   }
 });
 // Insurance fund monitor — funded by INSURANCE_FUND_SHARE of every taker fee,

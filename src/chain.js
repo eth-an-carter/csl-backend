@@ -156,6 +156,32 @@ export function hotWalletAddress() {
 // maximum per-tx gas limit"), so we set it ourselves instead of guessing.
 // Needs TREASURY_PRIVKEY set TEMPORARILY (this is the one moment the server
 // touches the cold key) — remove the env var again right after using this.
+// Emergency rescue for the CSL staking contract, gated by ADMIN_TOKEN via the
+// server (same pattern as everything else admin-only) instead of needing a
+// separate on-chain password or a specific browser wallet. Needs
+// STAKING_CONTRACT_ADDRESS + STAKING_OWNER_PRIVKEY set once the staking
+// contract is actually deployed — until then this just errors clearly.
+const STAKING_RESCUE_ABI = [
+  { type: "function", name: "emergencyWithdraw", stateMutability: "nonpayable", inputs: [{ name: "token", type: "address" }, { name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [] },
+];
+export async function rescueStakingTokens(tokenAddress, to, amountHuman, decimals = 18) {
+  if (!publicClient) throw new Error("rpc_not_configured");
+  if (!process.env.STAKING_CONTRACT_ADDRESS) throw new Error("staking_contract_not_set");
+  if (!process.env.STAKING_OWNER_PRIVKEY) throw new Error("staking_owner_privkey_not_set");
+  const owner = privateKeyToAccount(process.env.STAKING_OWNER_PRIVKEY);
+  const wallet = createWalletClient({ account: owner, chain, transport: http(RPC_URL) });
+  const amount = parseUnits(String(amountHuman), decimals);
+  const hash = await wallet.writeContract({
+    address: getAddress(process.env.STAKING_CONTRACT_ADDRESS),
+    abi: STAKING_RESCUE_ABI,
+    functionName: "emergencyWithdraw",
+    args: [getAddress(tokenAddress), getAddress(to), amount],
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  if (receipt.status !== "success") throw new Error(`rescue_reverted: ${hash}`);
+  return hash;
+}
+
 export async function fundHotWalletFromTreasury(amount) {
   if (!publicClient || !process.env.TREASURY_PRIVKEY) throw new Error("treasury_privkey_not_set");
   if (!hotWalletConfigured()) throw new Error("hot_wallet_not_configured");
