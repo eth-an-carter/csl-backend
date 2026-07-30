@@ -12,7 +12,7 @@ import { fetchInventory } from "./inventory.js";
 import { pool, initDb, dbReady, getAccount, loadPriceSamples, savePriceSample, prunePriceSamples, saveDailyClose, loadDailyCloses, saveAvatar, getLeaderboard } from "./db.js";
 import { requireAuth, authEnabled, issueNonce, verifySignatureAndIssueToken } from "./auth.js";
 import { openPosition, closePosition, liquidationSweep, limitOrderSweep, createLimitOrder, cancelLimitOrder, MAX_LEVERAGE, MAX_COLLATERAL_PER_POSITION, TAKER_FEE, LIQ_BURN_SHARE } from "./engine.js";
-import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listDeposits, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, retryAllPendingWithdrawals, markWithdrawalSent, vaultStats, vaultDeposit, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
+import { initSettlementTables, getDepositInfo, scanDeposits, requestWithdrawal, listWithdrawals, listDeposits, listPendingWithdrawals, rejectWithdrawal, retryWithdrawalPayout, retryAllPendingWithdrawals, markWithdrawalSent, vaultStats, vaultDeposit, vaultWithdraw, vaultPosition, sweepAllDeposits, depositAddressesWithBalances } from "./settlement.js";
 import { depositsEnabled, hotWalletConfigured, hotWalletAddress, hotWalletBalance, fundHotWalletFromTreasury, autoRefillHotWallet, logChainStatus } from "./chain.js";
 
 const PORT = process.env.PORT || 8080;
@@ -611,6 +611,17 @@ app.post("/api/vault/deposit", rateLimit({ max: 20 }), requireAuth, async (req, 
   if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
   const r = await vaultDeposit(req.privyId, req.body?.amount);
   res.status(r.error ? 400 : 200).json(r);
+});
+
+app.post("/api/vault/withdraw", rateLimit({ max: 20 }), requireAuth, async (req, res) => {
+  if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
+  const r = await vaultWithdraw(req.privyId, req.body?.amount);
+  res.status(r.error ? 400 : 200).json(r);
+});
+
+app.get("/api/vault/position", requireAuth, async (req, res) => {
+  if (!dbReady()) return res.status(503).json({ error: "db_not_configured" });
+  res.json(await vaultPosition(req.privyId));
 });
 
 // public engine config (real params, no secrets)

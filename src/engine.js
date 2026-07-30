@@ -97,6 +97,11 @@ export async function openPosition(privyId, market, mark, { side, collateral, le
       `INSERT INTO insurance_fund_ledger (id, type, amount_usd, market_key, created_at) VALUES ($1,'contribution',$2,$3,$4)`,
       [randomUUID(), Number(insuranceCut.toFixed(6)), market.key, Date.now()]
     );
+    const vaultFeeShare = fee - insuranceCut;
+    await client.query(
+      `INSERT INTO vault_pnl_ledger (id, type, amount_usd, created_at) VALUES ($1,'fee_share',$2,$3)`,
+      [randomUUID(), Number(vaultFeeShare.toFixed(6)), Date.now()]
+    );
     await client.query("COMMIT");
     return { ok: true, position: pos, fee };
   } catch (e) {
@@ -231,6 +236,11 @@ export async function limitOrderSweep(markOf, markAgeOf, MARKETS) {
       await client.query(
         `INSERT INTO insurance_fund_ledger (id, type, amount_usd, market_key, created_at) VALUES ($1,'contribution',$2,$3,$4)`,
         [randomUUID(), Number(insuranceCut.toFixed(6)), market.key, Date.now()]
+      );
+      const vaultFeeShare2 = fee - insuranceCut;
+      await client.query(
+        `INSERT INTO vault_pnl_ledger (id, type, amount_usd, created_at) VALUES ($1,'fee_share',$2,$3)`,
+        [randomUUID(), Number(vaultFeeShare2.toFixed(6)), Date.now()]
       );
       await client.query(`UPDATE limit_orders SET position_id=$2 WHERE id=$1`, [o.id, pos.id]);
       await client.query("COMMIT");

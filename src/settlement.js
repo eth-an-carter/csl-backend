@@ -46,6 +46,25 @@ export async function initSettlementTables() {
       amount    double precision NOT NULL,
       created_at bigint NOT NULL
     );
+    -- vault withdrawals — how much of their pro-rata claim each depositor has
+    -- actually pulled back out. NAV math: vault deposits - withdrawals + fee
+    -- share earned - bad debt absorbed = current vault value.
+    CREATE TABLE IF NOT EXISTS vault_withdrawals (
+      id        text PRIMARY KEY,
+      privy_id  text NOT NULL,
+      amount    double precision NOT NULL,
+      created_at bigint NOT NULL
+    );
+    -- every dollar that actually moves the vault's value up or down: the
+    -- fee-share it earns from trading, and the bad debt it has to absorb.
+    -- Without this, "gains and losses shared pro-rata" was just docs copy —
+    -- there was no ledger connecting real trading activity to vault NAV at all.
+    CREATE TABLE IF NOT EXISTS vault_pnl_ledger (
+      id         text PRIMARY KEY,
+      type       text NOT NULL,   -- 'fee_share' | 'bad_debt'
+      amount_usd double precision NOT NULL,
+      created_at bigint NOT NULL
+    );
   `);
 }
 
@@ -328,9 +347,22 @@ export async function listDeposits(privyId) {
 }
 
 // ---- vault --------------------------------------------------------------------
+// Current vault NAV: what it actually holds right now, not just what was
+// ever deposited. Fee-share and bad-debt are the two flows that make this
+// move independent of deposits/withdrawals — this is what "pro-rata gains
+// and losses" actually means, computed for real instead of asserted in docs.
+async function vaultNav() {
+  const d = (await pool.query(`SELECT coalesce(sum(amount),0) s FROM vault_deposits`)).rows[0];
+  const w = (await pool.query(`SELECT coalesce(sum(amount),0) s FROM vault_withdrawals`)).rows[0];
+  const fees = (await pool.query(`SELECT coalesce(sum(amount_usd),0) s FROM vault_pnl_ledger WHERE type='fee_share'`)).rows[0];
+  const bad = (await pool.query(`SELECT coalesce(sum(amount_usd),0) s FROM bad_debt_ledger`)).rows[0];
+  return Number(d.s) - Number(w.s) + Number(fees.s) - Number(bad.s);
+}
+
 export async function vaultStats() {
-  const r = (await pool.query(`SELECT coalesce(sum(amount),0) tvl, count(distinct privy_id)::int depositors FROM vault_deposits`)).rows[0];
-  return { open: VAULT_OPEN, tvl: Number(r.tvl), depositors: r.depositors };
+  const d = (await pool.query(`SELECT coalesce(sum(amount),0) tvl, count(distinct privy_id)::int depositors FROM vault_deposits`)).rows[0];
+  const nav = await vaultNav();
+  return { open: VAULT_OPEN, tvl: Number(d.tvl), depositors: d.depositors, nav: Math.round(nav * 100) / 100 };
 }
 
 export async function vaultDeposit(privyId, amount) {
@@ -345,6 +377,48 @@ export async function vaultDeposit(privyId, amount) {
     await client.query(`UPDATE users SET balance=balance-$2 WHERE privy_id=$1`, [privyId, amount]);
     await client.query(`INSERT INTO vault_deposits (id, privy_id, amount, created_at) VALUES ($1,$2,$3,$4)`,
       [randomUUID(), privyId, amount, Date.now()]);
+    await client.query("COMMIT");
+    return { ok: true };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    return { error: "internal" };
+  } finally { client.release(); }
+}
+
+// A depositor's claim is their share of TOTAL net contribution (deposits -
+// withdrawals, across everyone) applied to the CURRENT NAV — the standard
+// pro-rata vault mechanic. Depositing when the vault is up means your claim
+// is worth more than what you put in; when it's down, less.
+export async function vaultPosition(privyId) {
+  const mine = (await pool.query(
+    `SELECT coalesce(sum(amount),0) s FROM (
+       SELECT amount FROM vault_deposits WHERE privy_id=$1
+       UNION ALL SELECT -amount FROM vault_withdrawals WHERE privy_id=$1
+     ) x`, [privyId]
+  )).rows[0];
+  const all = (await pool.query(
+    `SELECT coalesce(sum(amount),0) s FROM (
+       SELECT amount FROM vault_deposits UNION ALL SELECT -amount FROM vault_withdrawals
+     ) x`
+  )).rows[0];
+  const myNet = Number(mine.s);
+  const totalNet = Number(all.s);
+  const nav = await vaultNav();
+  const claim = totalNet > 0 ? (myNet / totalNet) * nav : 0;
+  return { netContributed: Math.round(myNet * 100) / 100, claimable: Math.max(0, Math.round(claim * 100) / 100) };
+}
+
+export async function vaultWithdraw(privyId, amount) {
+  amount = Math.floor(Number(amount) * 100) / 100;
+  if (!Number.isFinite(amount) || amount <= 0) return { error: "bad_amount" };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const pos = await vaultPosition(privyId); // read outside the row lock is fine — worst case a concurrent withdrawal is retried
+    if (amount > pos.claimable + 0.005) { await client.query("ROLLBACK"); return { error: "exceeds_claim", claimable: pos.claimable }; }
+    await client.query(`INSERT INTO vault_withdrawals (id, privy_id, amount, created_at) VALUES ($1,$2,$3,$4)`,
+      [randomUUID(), privyId, amount, Date.now()]);
+    await client.query(`UPDATE users SET balance=balance+$2 WHERE privy_id=$1`, [privyId, amount]);
     await client.query("COMMIT");
     return { ok: true };
   } catch (e) {
